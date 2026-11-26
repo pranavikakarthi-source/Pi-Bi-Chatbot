@@ -3,7 +3,7 @@
 import { useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import ThemeToggle from "@/components/theme/ThemeToggle";
+import AuthBoxShell from "./AuthBoxShell";
 import EyeIcon from "./EyeIcon";
 
 const REMEMBER_EMAIL_KEY = "chatbot_remembered_email";
@@ -87,12 +87,9 @@ export default function AuthForm() {
   }
 
   return (
-    <main className="relative min-h-screen w-full bg-white dark:bg-[#0b141a] text-[#111111] dark:text-neutral-100 flex items-center justify-center px-5 py-12 font-sans transition-colors">
-      <div className="absolute right-5 top-5">
-        <ThemeToggle />
-      </div>
-      <div className="w-full max-w-[380px]">
-        <div className="text-center mb-8">
+    <AuthBoxShell maxWidthClass="max-w-[430px]">
+      <div>
+        <div className="text-center mb-7">
           <h1 className="text-[28px] font-semibold tracking-[-0.02em] text-[#111111] dark:text-neutral-100 leading-tight">
             Login to your account
           </h1>
@@ -209,6 +206,6 @@ export default function AuthForm() {
           </button>
         </form>
       </div>
-    </main>
+    </AuthBoxShell>
   );
 }

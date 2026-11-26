@@ -42,3 +42,6 @@ next-env.d.ts
 
 # supabase migrations
 /supabase/
+
+# electron build artifacts
+/dist-electron/

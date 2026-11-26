@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import ThemeToggle from "@/components/theme/ThemeToggle";
+import AuthBoxShell from "@/components/auth/AuthBoxShell";
 
 function validateUsername(value) {
   return /^[a-zA-Z0-9_.]{3,30}$/.test(value.trim());
@@ -217,36 +217,42 @@ export default function ProfileSetupForm({ initialProfile }) {
     }
   }
 
-  return (
-    <main className="min-h-screen w-full bg-white dark:bg-[#0b141a] text-[#111111] dark:text-neutral-100 flex flex-col items-center px-5 py-6 font-sans transition-colors">
-      <div className="w-full max-w-[400px] flex items-center justify-between mb-6">
-        <button
-          type="button"
-          onClick={handleBack}
-          aria-label="Go back"
-          className="inline-flex h-9 w-9 items-center justify-center rounded-full text-[#1f1f1f] dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition cursor-pointer"
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="h-5 w-5"
-            aria-hidden="true"
-          >
-            <line x1="19" y1="12" x2="5" y2="12" />
-            <polyline points="12 19 5 12 12 5" />
-          </svg>
-        </button>
+  const backButton = (
+    <button
+      type="button"
+      onClick={handleBack}
+      aria-label="Go back"
+      className="inline-flex h-9 w-9 items-center justify-center rounded-full text-[#1f1f1f] dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition cursor-pointer"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="h-5 w-5"
+        aria-hidden="true"
+      >
+        <line x1="19" y1="12" x2="5" y2="12" />
+        <polyline points="12 19 5 12 12 5" />
+      </svg>
+    </button>
+  );
 
-        <ThemeToggle />
+  return (
+    <AuthBoxShell leftAction={backButton} maxWidthClass="max-w-[460px]">
+      <div className="mb-6">
+        <h1 className="text-[24px] font-bold tracking-[-0.02em] text-[#111111] dark:text-white">
+          Set up your profile
+        </h1>
+        <p className="mt-1 text-[13.5px] text-[#667085] dark:text-neutral-400">
+          Add your photo and details so people can recognize you in chat
+        </p>
       </div>
 
-      <div className="w-full max-w-[380px] flex-1 flex flex-col justify-center pb-10">
-        <form onSubmit={handleSubmit} className="space-y-8">
+      <form onSubmit={handleSubmit} className="space-y-6">
           <div className="flex flex-col items-center">
             <input
               ref={fileInputRef}
@@ -393,7 +399,6 @@ export default function ProfileSetupForm({ initialProfile }) {
             </button>
           </div>
         </form>
-      </div>
-    </main>
+    </AuthBoxShell>
   );
 }

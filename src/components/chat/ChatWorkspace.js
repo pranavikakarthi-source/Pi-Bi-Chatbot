@@ -128,7 +128,6 @@ export default function ChatWorkspace({
   const [searchQuery, setSearchQuery] = useState("");
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [isInfoDrawerOpen, setIsInfoDrawerOpen] = useState(false);
-  const [wsStatus, setWsStatus] = useState("connecting"); // "connecting" | "connected" | "reconnecting"
 
   const [onlineUserIds, setOnlineUserIds] = useState(() => new Set());
   const [typingByConv, setTypingByConv] = useState({}); // { [convId]: { [userId]: name } }
@@ -361,7 +360,7 @@ export default function ChatWorkspace({
       showBrowserDesktopNotification({
         title,
         body,
-        icon: sender?.avatarUrl || "/favicon.ico",
+        icon: sender?.avatarUrl || "",
         conversationId: msg.conversation_id,
         onSelectConversation: (convId) => {
           setActiveConversationId(convId);
@@ -458,7 +457,6 @@ export default function ChatWorkspace({
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          setWsStatus("connected");
           await presenceChannel.track({
             user_id: currentUser.id,
             display_name: currentUser.displayName,
@@ -467,8 +465,6 @@ export default function ChatWorkspace({
           if (activeConversationIdRef.current) {
             acknowledgeReceipt(activeConversationIdRef.current, "read");
           }
-        } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-          setWsStatus("reconnecting");
         }
       });
 
@@ -1464,9 +1460,24 @@ export default function ChatWorkspace({
         <div className="px-4 py-3 border-t border-neutral-100 dark:border-neutral-800 flex items-center justify-between gap-2">
           <Link
             href="/profile-setup"
-            className="text-xs font-medium text-neutral-600 dark:text-neutral-300 hover:text-[#2b8c98] transition"
+            aria-label="Settings"
+            title="Settings"
+            className="h-9 w-9 rounded-full flex items-center justify-center text-neutral-600 dark:text-neutral-300 hover:text-[#2b8c98] hover:bg-neutral-100 dark:hover:bg-neutral-800 transition"
           >
-            Edit Profile
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="h-[18px] w-[18px]"
+              aria-hidden="true"
+            >
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
           </Link>
           <SignOutButton />
         </div>
@@ -1566,28 +1577,6 @@ export default function ChatWorkspace({
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
-                <span
-                  title={`WebSocket ${wsStatus}`}
-                  className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-neutral-200 dark:border-neutral-700 px-2.5 py-1 text-[11px] font-medium text-neutral-600 dark:text-neutral-300"
-                >
-                  <span
-                    className={`h-1.5 w-1.5 rounded-full ${
-                      wsStatus === "connected"
-                        ? "bg-emerald-500"
-                        : wsStatus === "reconnecting"
-                          ? "bg-amber-500"
-                          : "bg-neutral-400"
-                    }`}
-                  />
-                  <span>
-                    {wsStatus === "connected"
-                      ? "Live WS"
-                      : wsStatus === "reconnecting"
-                        ? "Reconnecting"
-                        : "Connecting"}
-                  </span>
-                </span>
-
                 <button
                   type="button"
                   onClick={() => setIsInfoDrawerOpen((prev) => !prev)}

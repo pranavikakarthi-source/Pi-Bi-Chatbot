@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import ThemeToggle from "@/components/theme/ThemeToggle";
+import AuthBoxShell from "./AuthBoxShell";
 import EyeIcon from "./EyeIcon";
 
 const OTP_LENGTH = 6;
@@ -277,45 +277,51 @@ export default function SignUpFlow() {
 
   const otpCode = otpDigits.join("");
 
-  return (
-    <main className="relative min-h-screen w-full bg-white dark:bg-[#0b141a] text-[#111111] dark:text-neutral-100 flex items-center justify-center px-5 py-12 font-sans transition-colors">
-      <div className="absolute right-5 top-5">
-        <ThemeToggle />
-      </div>
-      <div className="w-full max-w-[400px]">
-        {step === "otp" && (
-          <button
-            type="button"
-            onClick={() => {
-              setErrorMessage("");
-              setStatusMessage("");
-              setStep("email");
-            }}
-            aria-label="Back to email step"
-            className="mb-4 inline-flex h-9 w-9 items-center justify-center rounded-full bg-[#f5f5f5] dark:bg-neutral-800 text-[#1f1f1f] dark:text-neutral-200 hover:bg-[#ebebeb] dark:hover:bg-neutral-700 transition-colors cursor-pointer"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="h-4 w-4"
-              aria-hidden="true"
-            >
-              <line x1="19" y1="12" x2="5" y2="12" />
-              <polyline points="12 19 5 12 12 5" />
-            </svg>
-          </button>
-        )}
+  const stepNumber = step === "email" ? 1 : step === "otp" ? 2 : 3;
+  const stepLabel =
+    step === "email"
+      ? "Email verification"
+      : step === "otp"
+        ? "Enter OTP code"
+        : "Set your password";
 
-        <div className="text-center mb-8">
-          <h1 className="text-[36px] font-bold tracking-[-0.025em] text-[#111111] dark:text-neutral-100 leading-tight">
+  const backToEmailButton =
+    step === "otp" ? (
+      <button
+        type="button"
+        onClick={() => {
+          setErrorMessage("");
+          setStatusMessage("");
+          setStep("email");
+        }}
+        aria-label="Back to email step"
+        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-[#f5f5f5] dark:bg-neutral-800 text-[#1f1f1f] dark:text-neutral-200 hover:bg-[#ebebeb] dark:hover:bg-neutral-700 transition-colors cursor-pointer"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="h-4 w-4"
+          aria-hidden="true"
+        >
+          <line x1="19" y1="12" x2="5" y2="12" />
+          <polyline points="12 19 5 12 12 5" />
+        </svg>
+      </button>
+    ) : null;
+
+  return (
+    <AuthBoxShell leftAction={backToEmailButton} maxWidthClass="max-w-[440px]">
+      <div>
+        <div className="text-center mb-5">
+          <h1 className="text-[32px] font-bold tracking-[-0.025em] text-[#111111] dark:text-neutral-100 leading-tight">
             Sign up
           </h1>
-          <p className="mt-2 text-[14px] text-[#737373] dark:text-neutral-400">
+          <p className="mt-1.5 text-[14px] text-[#737373] dark:text-neutral-400">
             Already have an account?{" "}
             <Link
               href="/login"
@@ -324,6 +330,30 @@ export default function SignUpFlow() {
               Login
             </Link>
           </p>
+        </div>
+
+        {/* Step progress bar (inspired by card step layout) */}
+        <div className="mb-6 rounded-2xl bg-neutral-50 dark:bg-[#0b141a] border border-neutral-200/70 dark:border-neutral-800 px-3.5 py-2.5 flex items-center justify-between gap-3">
+          <span className="text-xs font-medium text-neutral-600 dark:text-neutral-300">
+            {stepLabel}
+          </span>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              {[1, 2, 3].map((idx) => (
+                <span
+                  key={idx}
+                  className={`h-1.5 w-4 rounded-full transition-colors ${
+                    idx <= stepNumber
+                      ? "bg-[#2b8c98]"
+                      : "bg-neutral-200 dark:bg-neutral-700"
+                  }`}
+                />
+              ))}
+            </div>
+            <span className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400">
+              {stepNumber} of 3
+            </span>
+          </div>
         </div>
 
         {step === "email" && (
@@ -505,6 +535,6 @@ export default function SignUpFlow() {
           </form>
         )}
       </div>
-    </main>
+    </AuthBoxShell>
   );
 }
