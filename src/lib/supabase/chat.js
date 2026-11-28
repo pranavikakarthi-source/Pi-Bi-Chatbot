@@ -20,7 +20,7 @@ function mapAuthUserToProfile(authUser, dbRow) {
     username,
     fullName,
     displayName,
-    about: dbRow?.about || meta.about || "Hey there! I am using Chatbot.",
+    about: dbRow?.about || meta.about || "Hey there! I am using PingMe.",
     phone: dbRow?.phone || meta.phone || "",
     avatarUrl: dbRow?.avatar_url || meta.avatar_url || "",
     isOnline: Boolean(dbRow?.is_online),

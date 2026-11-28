@@ -32,7 +32,7 @@ export default function AuthBoxShell({
                   </svg>
                 </span>
                 <span className="text-sm font-semibold tracking-tight text-neutral-900 dark:text-neutral-100">
-                  Chatbot
+                  PingMe
                 </span>
               </div>
             )}

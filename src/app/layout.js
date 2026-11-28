@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata = {
-  title: "Chatbot",
-  description: "Real-time application powered by Next.js and Supabase",
+  title: "PingMe",
+  description: "Real-time chat, voice & video calling app powered by Next.js and Supabase",
 };
 
 const themeInitScript = `

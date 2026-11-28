@@ -344,7 +344,7 @@ export default function ProfileSetupForm({ initialProfile }) {
               maxLength={160}
               value={about}
               onChange={(e) => setAbout(e.target.value)}
-              placeholder="Hey there! I am using Chatbot."
+              placeholder="Hey there! I am using PingMe."
               isValid={isAboutValid}
             />
 

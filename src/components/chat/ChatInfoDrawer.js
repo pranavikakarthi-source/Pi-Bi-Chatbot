@@ -209,7 +209,7 @@ export default function ChatInfoDrawer({
                     About
                   </p>
                   <p className="mt-1 text-sm text-neutral-800 dark:text-neutral-200">
-                    {peer.about || "Hey there! I am using Chatbot."}
+                    {peer.about || "Hey there! I am using PingMe."}
                   </p>
                 </div>
                 <div>

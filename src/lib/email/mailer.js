@@ -32,7 +32,7 @@ export async function sendSignupOtpEmail({ to, otp }) {
   const transporter = createMailTransporter();
 
   await transporter.sendMail({
-    from: `"Chatbot" <${user}>`,
+    from: `"PingMe" <${user}>`,
     to,
     subject: `${otp} is your verification code`,
     text: `Your verification code is ${otp}. Enter this 6-digit OTP to verify your email and complete your sign up. This code expires in 10 minutes.`,

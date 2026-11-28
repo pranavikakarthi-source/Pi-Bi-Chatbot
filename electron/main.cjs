@@ -14,7 +14,7 @@ const {
   Tray,
 } = require("electron");
 
-const APP_USER_MODEL_ID = "com.chatbot.desktop";
+const APP_USER_MODEL_ID = "com.pingme.desktop";
 
 let mainWindow = null;
 let tray = null;
@@ -73,16 +73,16 @@ function createTray() {
 
   const trayIcon = nativeImage.createFromPath(iconPath);
   tray = new Tray(trayIcon);
-  tray.setToolTip("Chatbot");
+  tray.setToolTip("PingMe");
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: "Open Chatbot",
+      label: "Open PingMe",
       click: () => showAndFocusWindow(),
     },
     { type: "separator" },
     {
-      label: "Quit Chatbot",
+      label: "Quit PingMe",
       click: () => {
         isQuitting = true;
         app.quit();
@@ -103,7 +103,7 @@ function createMainWindow() {
     height: 820,
     minWidth: 820,
     minHeight: 600,
-    title: "Chatbot",
+    title: "PingMe",
     icon: getIconPath(),
     autoHideMenuBar: true,
     webPreferences: {
@@ -120,10 +120,10 @@ function createMainWindow() {
     const html = `
       <!doctype html>
       <html>
-        <head><meta charset="utf-8"><title>Chatbot - Connection</title></head>
+        <head><meta charset="utf-8"><title>PingMe - Connection</title></head>
         <body style="font-family:Segoe UI,Arial,sans-serif;background:#0b141a;color:#f3f4f6;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
           <div style="text-align:center;max-width:420px;padding:24px;">
-            <h2 style="margin:0 0 8px;">Unable to connect to Chatbot</h2>
+            <h2 style="margin:0 0 8px;">Unable to connect to PingMe</h2>
             <p style="font-size:13px;color:#9ca3af;margin:0 0 18px;">Could not reach ${safeUrl} (${desc}). Start the server or update electron/config.json.</p>
             <button onclick="window.location.href='${safeUrl}'" style="background:#2b8c98;color:#fff;border:none;border-radius:999px;padding:10px 24px;font-size:13px;cursor:pointer;">Retry</button>
           </div>
