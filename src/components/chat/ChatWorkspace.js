@@ -16,8 +16,12 @@ import {
   registerServiceWorkerAndSubscribe,
   showBrowserDesktopNotification,
 } from "@/lib/notifications/browser";
-import ThemeToggle from "@/components/theme/ThemeToggle";
+import { useTheme } from "@/components/theme/ThemeProvider";
 import SignOutButton from "@/components/auth/SignOutButton";
+import {
+  resolveWallpaperConfig,
+  WALLPAPER_STORAGE_KEY,
+} from "@/lib/chat/wallpapers";
 import {
   acquireCallMedia,
   acquireScreenShareStream,
@@ -33,8 +37,33 @@ import ChatInfoDrawer from "./ChatInfoDrawer";
 import MessageBubble from "./MessageBubble";
 import NewGroupModal from "./NewGroupModal";
 import NotificationToast from "./NotificationToast";
+import { ThemeModal, WallpaperModal } from "./ThemeWallpaperModals";
 
 const NOTIF_PERMISSION_EVENT = "chatbot-notif-perm-change";
+const WALLPAPER_CHANGE_EVENT = "chatbot-wallpaper-change";
+
+function subscribeWallpaper(callback) {
+  window.addEventListener("storage", callback);
+  window.addEventListener(WALLPAPER_CHANGE_EVENT, callback);
+  return () => {
+    window.removeEventListener("storage", callback);
+    window.removeEventListener(WALLPAPER_CHANGE_EVENT, callback);
+  };
+}
+
+function getWallpaperSnapshot() {
+  try {
+    return (
+      window.localStorage.getItem(WALLPAPER_STORAGE_KEY) || "default-doodle"
+    );
+  } catch {
+    return "default-doodle";
+  }
+}
+
+function getServerWallpaperSnapshot() {
+  return "default-doodle";
+}
 
 function subscribeNotifPermission(callback) {
   window.addEventListener(NOTIF_PERMISSION_EVENT, callback);
@@ -138,6 +167,41 @@ export default function ChatWorkspace({
   const [searchQuery, setSearchQuery] = useState("");
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [isInfoDrawerOpen, setIsInfoDrawerOpen] = useState(false);
+  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
+  const [isThemeModalOpen, setIsThemeModalOpen] = useState(false);
+  const [isWallpaperModalOpen, setIsWallpaperModalOpen] = useState(false);
+  const moreMenuRef = useRef(null);
+
+  const { resolvedTheme } = useTheme();
+  const wallpaperId = useSyncExternalStore(
+    subscribeWallpaper,
+    getWallpaperSnapshot,
+    getServerWallpaperSnapshot
+  );
+  const activeWallpaper = useMemo(
+    () => resolveWallpaperConfig(wallpaperId, resolvedTheme === "dark"),
+    [wallpaperId, resolvedTheme]
+  );
+
+  function handleSelectWallpaper(nextId) {
+    try {
+      window.localStorage.setItem(WALLPAPER_STORAGE_KEY, nextId);
+    } catch {
+      // Ignore storage quota errors.
+    }
+    window.dispatchEvent(new Event(WALLPAPER_CHANGE_EVENT));
+  }
+
+  useEffect(() => {
+    if (!isMoreMenuOpen) return undefined;
+    function handleOutsideClick(event) {
+      if (moreMenuRef.current && !moreMenuRef.current.contains(event.target)) {
+        setIsMoreMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [isMoreMenuOpen]);
 
   const [onlineUserIds, setOnlineUserIds] = useState(() => new Set());
   const [typingByConv, setTypingByConv] = useState({}); // { [convId]: { [userId]: name } }
@@ -2386,7 +2450,117 @@ export default function ChatWorkspace({
               >
                 + Group
               </button>
-              <ThemeToggle />
+
+              <div className="relative" ref={moreMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setIsMoreMenuOpen((prev) => !prev)}
+                  aria-label="More options"
+                  title="Menu"
+                  aria-expanded={isMoreMenuOpen}
+                  className={`h-8 w-8 rounded-full flex items-center justify-center transition cursor-pointer ${
+                    isMoreMenuOpen
+                      ? "bg-neutral-200 dark:bg-neutral-700 text-neutral-900 dark:text-white"
+                      : "text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                  }`}
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    className="h-4 w-4"
+                    aria-hidden="true"
+                  >
+                    <circle cx="12" cy="5" r="1.8" />
+                    <circle cx="12" cy="12" r="1.8" />
+                    <circle cx="12" cy="19" r="1.8" />
+                  </svg>
+                </button>
+
+                {isMoreMenuOpen && (
+                  <div className="absolute right-0 mt-2 w-48 rounded-2xl border border-neutral-200 dark:border-neutral-700/80 bg-white dark:bg-[#233138] py-1.5 shadow-xl z-40">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsMoreMenuOpen(false);
+                        setIsGroupModalOpen(true);
+                      }}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[13.5px] font-medium text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-white/10 transition cursor-pointer"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.9"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="h-4 w-4 text-neutral-500 dark:text-neutral-300"
+                      >
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                        <circle cx="9" cy="7" r="4" />
+                        <line x1="19" y1="8" x2="19" y2="14" />
+                        <line x1="22" y1="11" x2="16" y2="11" />
+                      </svg>
+                      <span>New group</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsMoreMenuOpen(false);
+                        setIsThemeModalOpen(true);
+                      }}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[13.5px] font-medium text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-white/10 transition cursor-pointer"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.9"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="h-4 w-4 text-neutral-500 dark:text-neutral-300"
+                      >
+                        <circle cx="12" cy="12" r="4" />
+                        <path d="M12 2v2" />
+                        <path d="M12 20v2" />
+                        <path d="m4.93 4.93 1.41 1.41" />
+                        <path d="m17.66 17.66 1.41 1.41" />
+                        <path d="M2 12h2" />
+                        <path d="M20 12h2" />
+                      </svg>
+                      <span>Themes</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsMoreMenuOpen(false);
+                        setIsWallpaperModalOpen(true);
+                      }}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[13.5px] font-medium text-neutral-800 dark:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-white/10 transition cursor-pointer"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.9"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="h-4 w-4 text-neutral-500 dark:text-neutral-300"
+                      >
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                        <circle cx="8.5" cy="8.5" r="1.5" />
+                        <polyline points="21 15 16 10 5 21" />
+                      </svg>
+                      <span>Wallpaper</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -3085,19 +3259,24 @@ export default function ChatWorkspace({
             </header>
 
             {/* Messages Timeline */}
-            <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-3">
+            <div
+              className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-3 transition-[background] duration-300"
+              style={{ background: activeWallpaper.background }}
+            >
               {isLoadingMessages && activeMessages.length === 0 ? (
                 <div className="h-full flex items-center justify-center text-xs text-neutral-500">
                   Loading messages...
                 </div>
               ) : activeMessages.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center px-4">
-                  <p className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
-                    Say hello to {activeInfo.title}
-                  </p>
-                  <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-                    Send a message, photo, video, or document to start the conversation.
-                  </p>
+                  <div className="rounded-3xl bg-white/80 dark:bg-[#111b21]/80 backdrop-blur-xs px-6 py-5 border border-black/5 dark:border-white/10">
+                    <p className="text-sm font-medium text-neutral-800 dark:text-neutral-100">
+                      Say hello to {activeInfo.title}
+                    </p>
+                    <p className="mt-1 text-xs text-neutral-600 dark:text-neutral-400">
+                      Send a message, photo, video, or document to start the conversation.
+                    </p>
+                  </div>
                 </div>
               ) : (
                 activeMessages.map((msg) => (
@@ -3108,6 +3287,7 @@ export default function ChatWorkspace({
                     isGroup={activeInfo.isGroup}
                     senderProfile={usersById.get(msg.sender_id)}
                     receiptStatus={getMessageReceiptStatus(msg)}
+                    accentColor={activeWallpaper.bubbleColor}
                   />
                 ))
               )}
@@ -3317,6 +3497,20 @@ export default function ChatWorkspace({
         onlineUserIds={onlineUserIds}
         onClose={() => setIsGroupModalOpen(false)}
         onCreateGroup={handleCreateGroup}
+      />
+
+      <ThemeModal
+        key={`theme-${isThemeModalOpen ? "open" : "closed"}`}
+        isOpen={isThemeModalOpen}
+        onClose={() => setIsThemeModalOpen(false)}
+      />
+
+      <WallpaperModal
+        key={`wallpaper-${isWallpaperModalOpen ? wallpaperId : "closed"}`}
+        isOpen={isWallpaperModalOpen}
+        currentWallpaper={wallpaperId}
+        onSelectWallpaper={handleSelectWallpaper}
+        onClose={() => setIsWallpaperModalOpen(false)}
       />
 
       <CallOverlay

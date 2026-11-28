@@ -101,6 +101,7 @@ export default function MessageBubble({
   isGroup,
   senderProfile,
   receiptStatus = "sent",
+  accentColor = "",
 }) {
   const senderName =
     senderProfile?.displayName || senderProfile?.email || "User";
@@ -125,6 +126,9 @@ export default function MessageBubble({
             ? "bg-[#111111] dark:bg-[#005c4b] text-white rounded-br-sm"
             : "bg-white dark:bg-[#202c33] text-[#111111] dark:text-neutral-100 border border-neutral-200/70 dark:border-neutral-700/60 rounded-bl-sm"
         }`}
+        style={
+          isMine && accentColor ? { backgroundColor: accentColor } : undefined
+        }
       >
         {!isMine && isGroup && (
           <p className="mb-1 text-[11px] font-semibold text-[#2b8c98] dark:text-[#4eb8c7]">

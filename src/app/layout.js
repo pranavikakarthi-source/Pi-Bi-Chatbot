@@ -21,7 +21,7 @@ const themeInitScript = `
 (function () {
   try {
     var theme = window.localStorage.getItem("chatbot_theme");
-    var isDark = theme === "dark";
+    var isDark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
     document.documentElement.classList.toggle("dark", isDark);
     document.documentElement.style.colorScheme = isDark ? "dark" : "light";
   } catch (e) {}

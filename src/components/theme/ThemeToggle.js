@@ -3,8 +3,8 @@
 import { useTheme } from "./ThemeProvider";
 
 export default function ThemeToggle({ className = "" }) {
-  const { theme, toggleTheme } = useTheme();
-  const isDark = theme === "dark";
+  const { resolvedTheme, toggleTheme } = useTheme();
+  const isDark = resolvedTheme === "dark";
 
   return (
     <button
