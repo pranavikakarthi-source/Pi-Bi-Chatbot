@@ -61,9 +61,17 @@ export async function listAllChatUsers(adminSupabase) {
 }
 
 /**
- * Fetches hydrated conversations (participants + latest message) for a given user.
+ * Fetches paginated hydrated conversations (10 per retrieval by default) for a given user.
  */
-export async function listUserConversations(adminSupabase, userId, usersById) {
+export async function listUserConversations(
+  adminSupabase,
+  userId,
+  usersById,
+  { offset = 0, limit = 10 } = {}
+) {
+  const safeOffset = Math.max(0, Number(offset) || 0);
+  const safeLimit = Math.max(1, Math.min(25, Number(limit) || 10));
+
   const { data: myMemberships, error: memErr } = await adminSupabase
     .from("conversation_participants")
     .select("conversation_id")
@@ -71,40 +79,72 @@ export async function listUserConversations(adminSupabase, userId, usersById) {
 
   if (memErr) {
     if (isChatSchemaPendingError(memErr)) {
-      return { conversations: [], chatTablesReady: false };
+      return {
+        conversations: [],
+        chatTablesReady: false,
+        hasMore: false,
+        nextOffset: 0,
+      };
     }
     throw new Error(memErr.message);
   }
 
   const conversationIds = (myMemberships || []).map((m) => m.conversation_id);
   if (conversationIds.length === 0) {
-    return { conversations: [], chatTablesReady: true };
+    return {
+      conversations: [],
+      chatTablesReady: true,
+      hasMore: false,
+      nextOffset: safeOffset,
+    };
   }
 
-  const [convRes, partRes, msgRes] = await Promise.all([
-    adminSupabase
-      .from("conversations")
-      .select("*")
-      .in("id", conversationIds)
-      .order("last_message_at", { ascending: false }),
+  // Fetch limit + 1 rows to know whether more pages remain.
+  const { data: rawConvs, error: convErr } = await adminSupabase
+    .from("conversations")
+    .select("*")
+    .in("id", conversationIds)
+    .order("last_message_at", { ascending: false })
+    .range(safeOffset, safeOffset + safeLimit);
+
+  if (convErr) {
+    if (isChatSchemaPendingError(convErr)) {
+      return {
+        conversations: [],
+        chatTablesReady: false,
+        hasMore: false,
+        nextOffset: 0,
+      };
+    }
+    throw new Error(convErr.message);
+  }
+
+  const allFetched = rawConvs || [];
+  const hasMore = allFetched.length > safeLimit;
+  const pageConvs = allFetched.slice(0, safeLimit);
+  const pageConvIds = pageConvs.map((c) => c.id);
+
+  if (pageConvIds.length === 0) {
+    return {
+      conversations: [],
+      chatTablesReady: true,
+      hasMore: false,
+      nextOffset: safeOffset,
+    };
+  }
+
+  const [partRes, msgRes] = await Promise.all([
     adminSupabase
       .from("conversation_participants")
       .select("*")
-      .in("conversation_id", conversationIds),
+      .in("conversation_id", pageConvIds),
     adminSupabase
       .from("messages")
       .select("*")
-      .in("conversation_id", conversationIds)
+      .in("conversation_id", pageConvIds)
       .order("created_at", { ascending: false })
-      .limit(200),
+      .limit(Math.max(40, pageConvIds.length * 4)),
   ]);
-
-  if (convRes.error) {
-    if (isChatSchemaPendingError(convRes.error)) {
-      return { conversations: [], chatTablesReady: false };
-    }
-    throw new Error(convRes.error.message);
-  }
 
   const participantsByConv = new Map();
   (partRes.data || []).forEach((row) => {
@@ -123,7 +163,7 @@ export async function listUserConversations(adminSupabase, userId, usersById) {
     }
   });
 
-  const conversations = (convRes.data || []).map((conv) => ({
+  const conversations = pageConvs.map((conv) => ({
     id: conv.id,
     type: conv.type,
     name: conv.name,
@@ -134,7 +174,12 @@ export async function listUserConversations(adminSupabase, userId, usersById) {
     lastMessage: lastMessageByConv.get(conv.id) || null,
   }));
 
-  return { conversations, chatTablesReady: true };
+  return {
+    conversations,
+    chatTablesReady: true,
+    hasMore,
+    nextOffset: safeOffset + conversations.length,
+  };
 }
 
 /**
@@ -177,4 +222,42 @@ export async function listUserCallLogs(adminSupabase, userId) {
   }
 
   return { callLogs: data || [], callTablesReady: true };
+}
+
+/**
+ * Fetches paginated messages (10 per retrieval by default) for a single conversation_id,
+ * returning oldest-to-newest order plus whether older messages exist.
+ */
+export async function listConversationMessages(
+  adminSupabase,
+  conversationId,
+  { limit = 10, before = null } = {}
+) {
+  const safeLimit = Math.max(1, Math.min(25, Number(limit) || 10));
+
+  let query = adminSupabase
+    .from("messages")
+    .select("*")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false })
+    .limit(safeLimit + 1);
+
+  if (before) {
+    query = query.lt("created_at", before);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    if (isChatSchemaPendingError(error)) {
+      return { messages: [], hasMore: false, nextBefore: null };
+    }
+    throw new Error(error.message);
+  }
+
+  const rows = data || [];
+  const hasMore = rows.length > safeLimit;
+  const pageMessages = rows.slice(0, safeLimit).reverse();
+  const nextBefore = pageMessages[0]?.created_at || null;
+
+  return { messages: pageMessages, hasMore, nextBefore };
 }

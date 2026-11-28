@@ -5,11 +5,14 @@ import { redirect } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   listAllChatUsers,
+  listConversationMessages,
   listUserCallLogs,
   listUserConversations,
 } from "@/lib/supabase/chat";
 import { createClient } from "@/lib/supabase/server";
 import { getUserRecordById, syncUserRecord } from "@/lib/supabase/users";
+import { getCachedNewChats } from "@/lib/cache/redis";
+import { WorkspaceShellSkeleton } from "@/components/chat/ChatSkeletons";
 import ChatWorkspace from "@/components/chat/ChatWorkspace";
 
 async function AuthenticatedChatApp() {
@@ -51,20 +54,32 @@ async function AuthenticatedChatApp() {
 
   const otherUsers = allUsers.filter((u) => u.id !== user.id);
 
-  const [{ conversations, chatTablesReady }, { callLogs }] = await Promise.all([
-    listUserConversations(adminSupabase, user.id, usersById),
+  const [convPage, { callLogs }, cachedNewChats] = await Promise.all([
+    listUserConversations(adminSupabase, user.id, usersById, {
+      offset: 0,
+      limit: 10,
+    }),
     listUserCallLogs(adminSupabase, user.id),
+    getCachedNewChats(user.id),
   ]);
 
+  const seenConvIds = new Set(convPage.conversations.map((c) => c.id));
+  const conversations = [
+    ...convPage.conversations,
+    ...cachedNewChats.filter((c) => c?.id && !seenConvIds.has(c.id)),
+  ].slice(0, 10);
+  const chatTablesReady = convPage.chatTablesReady;
+
   let initialMessages = [];
+  let initialHasMoreMessages = false;
   if (chatTablesReady && conversations[0]?.id) {
-    const { data: msgRows } = await adminSupabase
-      .from("messages")
-      .select("*")
-      .eq("conversation_id", conversations[0].id)
-      .order("created_at", { ascending: true })
-      .limit(250);
-    initialMessages = msgRows || [];
+    const firstMsgPage = await listConversationMessages(
+      adminSupabase,
+      conversations[0].id,
+      { limit: 10 }
+    );
+    initialMessages = firstMsgPage.messages;
+    initialHasMoreMessages = firstMsgPage.hasMore;
   }
 
   let initialMigrationSql = "";
@@ -85,22 +100,19 @@ async function AuthenticatedChatApp() {
       initialUsers={otherUsers}
       initialConversations={conversations}
       initialMessages={initialMessages}
+      initialHasMoreMessages={initialHasMoreMessages}
       initialChatTablesReady={chatTablesReady}
       initialMigrationSql={initialMigrationSql}
       initialCallLogs={callLogs}
+      initialHasMoreConversations={convPage.hasMore}
+      initialNextConversationsOffset={convPage.nextOffset}
     />
   );
 }
 
 export default function Home() {
   return (
-    <Suspense
-      fallback={
-        <main className="h-screen w-full bg-white dark:bg-[#0b141a] flex items-center justify-center text-sm text-neutral-500 dark:text-neutral-400">
-          Loading chats...
-        </main>
-      }
-    >
+    <Suspense fallback={<WorkspaceShellSkeleton />}>
       <AuthenticatedChatApp />
     </Suspense>
   );

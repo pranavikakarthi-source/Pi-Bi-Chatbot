@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import AvatarBadge from "./AvatarBadge";
 
 export default function NewGroupModal({
@@ -13,10 +14,43 @@ export default function NewGroupModal({
   const [groupName, setGroupName] = useState("");
   const [search, setSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
+  const [avatarFile, setAvatarFile] = useState(null);
+  const [avatarPreviewUrl, setAvatarPreviewUrl] = useState("");
   const [isCreating, setIsCreating] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (avatarPreviewUrl) {
+        URL.revokeObjectURL(avatarPreviewUrl);
+      }
+    };
+  }, [avatarPreviewUrl]);
 
   if (!isOpen) return null;
+
+  function handleAvatarSelect(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      setErrorMessage("Group photo must be JPG, PNG, WebP, or GIF.");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setErrorMessage("Group photo must be 5 MB or smaller.");
+      return;
+    }
+
+    setErrorMessage("");
+    if (avatarPreviewUrl) {
+      URL.revokeObjectURL(avatarPreviewUrl);
+    }
+    setAvatarFile(file);
+    setAvatarPreviewUrl(URL.createObjectURL(file));
+  }
 
   const filteredUsers = users.filter((u) => {
     const q = search.trim().toLowerCase();
@@ -55,10 +89,16 @@ export default function NewGroupModal({
       await onCreateGroup({
         name: groupName.trim(),
         memberIds: selectedIds,
+        avatarFile,
       });
       setGroupName("");
       setSearch("");
       setSelectedIds([]);
+      if (avatarPreviewUrl) {
+        URL.revokeObjectURL(avatarPreviewUrl);
+      }
+      setAvatarFile(null);
+      setAvatarPreviewUrl("");
       onClose();
     } catch (err) {
       setErrorMessage(
@@ -87,21 +127,64 @@ export default function NewGroupModal({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label
-              htmlFor="group-name"
-              className="block text-xs font-medium text-neutral-600 dark:text-neutral-300 mb-1.5"
-            >
-              Group Name
-            </label>
+          <div className="flex items-center gap-4">
             <input
-              id="group-name"
-              type="text"
-              value={groupName}
-              onChange={(e) => setGroupName(e.target.value)}
-              placeholder="e.g., Project Team"
-              className="w-full h-11 rounded-full bg-neutral-100 dark:bg-[#0b141a] border border-neutral-200 dark:border-neutral-700 px-4 text-sm text-neutral-900 dark:text-neutral-100 outline-none focus:border-[#2b8c98]"
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              onChange={handleAvatarSelect}
+              className="hidden"
+              aria-label="Choose group profile photo"
             />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              title="Add group profile photo"
+              className="group relative h-16 w-16 shrink-0 rounded-full overflow-hidden bg-[#2b8c98]/15 border border-[#2b8c98]/35 text-[#2b8c98] flex items-center justify-center cursor-pointer hover:bg-[#2b8c98]/25 transition"
+            >
+              {avatarPreviewUrl ? (
+                <Image
+                  unoptimized
+                  src={avatarPreviewUrl}
+                  alt="Group preview"
+                  width={64}
+                  height={64}
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="h-6 w-6"
+                  aria-hidden="true"
+                >
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                  <circle cx="12" cy="13" r="4" />
+                </svg>
+              )}
+            </button>
+
+            <div className="flex-1 min-w-0">
+              <label
+                htmlFor="group-name"
+                className="block text-xs font-medium text-neutral-600 dark:text-neutral-300 mb-1.5"
+              >
+                Group Name
+              </label>
+              <input
+                id="group-name"
+                type="text"
+                value={groupName}
+                onChange={(e) => setGroupName(e.target.value)}
+                placeholder="e.g., Project Team"
+                className="w-full h-11 rounded-full bg-neutral-100 dark:bg-[#0b141a] border border-neutral-200 dark:border-neutral-700 px-4 text-sm text-neutral-900 dark:text-neutral-100 outline-none focus:border-[#2b8c98]"
+              />
+            </div>
           </div>
 
           <div>

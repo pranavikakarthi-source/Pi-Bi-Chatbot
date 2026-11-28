@@ -34,6 +34,10 @@ import AvatarBadge from "./AvatarBadge";
 import CallOverlay from "./CallOverlay";
 import ChatAttachmentMenu from "./ChatAttachmentMenu";
 import ChatInfoDrawer from "./ChatInfoDrawer";
+import {
+  ConversationListSkeleton,
+  MessagesTimelineSkeleton,
+} from "./ChatSkeletons";
 import MessageBubble from "./MessageBubble";
 import NewGroupModal from "./NewGroupModal";
 import NotificationToast from "./NotificationToast";
@@ -141,13 +145,23 @@ export default function ChatWorkspace({
   initialUsers,
   initialConversations,
   initialMessages = [],
+  initialHasMoreMessages = false,
   initialChatTablesReady,
   initialMigrationSql = "",
   initialCallLogs = [],
+  initialHasMoreConversations = false,
+  initialNextConversationsOffset = 10,
 }) {
   const [currentUser, setCurrentUser] = useState(initialCurrentUser);
   const [users, setUsers] = useState(initialUsers);
   const [conversations, setConversations] = useState(initialConversations);
+  const [hasMoreConversations, setHasMoreConversations] = useState(
+    initialHasMoreConversations
+  );
+  const [nextConversationsOffset, setNextConversationsOffset] = useState(
+    initialNextConversationsOffset
+  );
+  const [isLoadingMoreConvs, setIsLoadingMoreConvs] = useState(false);
   const [chatTablesReady, setChatTablesReady] = useState(
     initialChatTablesReady
   );
@@ -161,7 +175,14 @@ export default function ChatWorkspace({
       ? { [initialConversations[0].id]: initialMessages }
       : {}
   );
+  const [hasMoreMsgsByConv, setHasMoreMsgsByConv] = useState(() =>
+    initialConversations[0]?.id
+      ? { [initialConversations[0].id]: initialHasMoreMessages }
+      : {}
+  );
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
+  const messagesScrollRef = useRef(null);
 
   const [filterTab, setFilterTab] = useState("all"); // "all" | "direct" | "group" | "calls"
   const [searchQuery, setSearchQuery] = useState("");
@@ -287,6 +308,83 @@ export default function ChatWorkspace({
     [messagesByConv, activeConversationId]
   );
 
+  const persistCachedNewChat = useCallback(
+    (conv) => {
+      if (!conv?.id) return;
+      try {
+        const key = `pingme_new_chats_${currentUser.id}`;
+        const raw = window.localStorage.getItem(key);
+        const existing = raw ? JSON.parse(raw) : [];
+        const updated = [
+          conv,
+          ...(Array.isArray(existing) ? existing : []).filter(
+            (c) => c?.id !== conv.id
+          ),
+        ].slice(0, 20);
+        window.localStorage.setItem(key, JSON.stringify(updated));
+      } catch {
+        // Ignore storage errors.
+      }
+    },
+    [currentUser.id]
+  );
+
+  // Merge any cached new chats from localStorage on mount so brand-new chats appear immediately.
+  useEffect(() => {
+    let cancelled = false;
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      try {
+        const raw = window.localStorage.getItem(
+          `pingme_new_chats_${currentUser.id}`
+        );
+        if (!raw) return;
+        const cached = JSON.parse(raw);
+        if (!Array.isArray(cached) || cached.length === 0) return;
+        setConversations((prev) => {
+          const seen = new Set(prev.map((c) => c.id));
+          const additions = cached.filter((c) => c?.id && !seen.has(c.id));
+          return additions.length > 0 ? [...additions, ...prev] : prev;
+        });
+      } catch {
+        // Ignore malformed cache.
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser.id]);
+
+  const loadMoreConversations = useCallback(async () => {
+    if (isLoadingMoreConvs || !hasMoreConversations) return;
+    setIsLoadingMoreConvs(true);
+    try {
+      const res = await fetch(
+        `/api/chat/conversations?offset=${nextConversationsOffset}&limit=10`,
+        { cache: "no-store" }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.conversations)) {
+        setConversations((prev) => {
+          const seen = new Set(prev.map((c) => c.id));
+          const additions = data.conversations.filter(
+            (c) => c?.id && !seen.has(c.id)
+          );
+          return [...prev, ...additions];
+        });
+        setHasMoreConversations(Boolean(data.hasMore));
+        setNextConversationsOffset(
+          Number(
+            data.nextOffset ??
+              nextConversationsOffset + data.conversations.length
+          )
+        );
+      }
+    } finally {
+      setIsLoadingMoreConvs(false);
+    }
+  }, [hasMoreConversations, isLoadingMoreConvs, nextConversationsOffset]);
+
   const refreshBootstrap = useCallback(async () => {
     try {
       const res = await fetch("/api/chat/bootstrap", { cache: "no-store" });
@@ -294,7 +392,19 @@ export default function ChatWorkspace({
       const data = await res.json();
       if (data.currentUser) setCurrentUser(data.currentUser);
       if (Array.isArray(data.users)) setUsers(data.users);
-      if (Array.isArray(data.conversations)) setConversations(data.conversations);
+      if (Array.isArray(data.conversations)) {
+        setConversations((prev) => {
+          const incomingIds = new Set(data.conversations.map((c) => c.id));
+          const extraLoaded = prev.filter((c) => !incomingIds.has(c.id));
+          return [...data.conversations, ...extraLoaded];
+        });
+      }
+      if (typeof data.hasMoreConversations === "boolean") {
+        setHasMoreConversations(data.hasMoreConversations);
+      }
+      if (typeof data.nextConversationsOffset === "number") {
+        setNextConversationsOffset(data.nextConversationsOffset);
+      }
       if (Array.isArray(data.callLogs)) setCallLogs(data.callLogs);
       if (typeof data.chatTablesReady === "boolean") {
         setChatTablesReady(data.chatTablesReady);
@@ -346,7 +456,7 @@ export default function ChatWorkspace({
       setIsLoadingMessages(true);
       try {
         const res = await fetch(
-          `/api/chat/messages?conversationId=${encodeURIComponent(conversationId)}`,
+          `/api/chat/messages?conversationId=${encodeURIComponent(conversationId)}&limit=10`,
           { cache: "no-store" }
         );
         const data = await res.json().catch(() => ({}));
@@ -354,6 +464,10 @@ export default function ChatWorkspace({
           setMessagesByConv((prev) => ({
             ...prev,
             [conversationId]: data.messages,
+          }));
+          setHasMoreMsgsByConv((prev) => ({
+            ...prev,
+            [conversationId]: Boolean(data.hasMore),
           }));
           if (data.messages.some((m) => m.sender_id !== currentUser.id)) {
             acknowledgeReceipt(conversationId, "read");
@@ -366,10 +480,61 @@ export default function ChatWorkspace({
     [acknowledgeReceipt, currentUser.id]
   );
 
-  // Auto-scroll to latest message.
+  const loadOlderMessages = useCallback(
+    async (conversationId) => {
+      if (!conversationId || isLoadingOlderMessages) return;
+      const existing = messagesByConv[conversationId] || [];
+      const oldestCreatedAt = existing[0]?.created_at;
+      if (!oldestCreatedAt || !hasMoreMsgsByConv[conversationId]) return;
+
+      const container = messagesScrollRef.current;
+      const prevScrollHeight = container?.scrollHeight || 0;
+      const prevScrollTop = container?.scrollTop || 0;
+
+      setIsLoadingOlderMessages(true);
+      try {
+        const res = await fetch(
+          `/api/chat/messages?conversationId=${encodeURIComponent(conversationId)}&limit=10&before=${encodeURIComponent(oldestCreatedAt)}`,
+          { cache: "no-store" }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && Array.isArray(data.messages)) {
+          setMessagesByConv((prev) => {
+            const currentList = prev[conversationId] || [];
+            const seen = new Set(currentList.map((m) => m.id));
+            const olderUnique = data.messages.filter((m) => m?.id && !seen.has(m.id));
+            return {
+              ...prev,
+              [conversationId]: [...olderUnique, ...currentList],
+            };
+          });
+          setHasMoreMsgsByConv((prev) => ({
+            ...prev,
+            [conversationId]: Boolean(data.hasMore),
+          }));
+
+          if (container) {
+            window.requestAnimationFrame(() => {
+              const newScrollHeight = container.scrollHeight;
+              container.scrollTop =
+                prevScrollTop + (newScrollHeight - prevScrollHeight);
+            });
+          }
+        }
+      } finally {
+        setIsLoadingOlderMessages(false);
+      }
+    },
+    [hasMoreMsgsByConv, isLoadingOlderMessages, messagesByConv]
+  );
+
+  const lastMessageId =
+    activeMessages[activeMessages.length - 1]?.id || null;
+
+  // Auto-scroll to latest message only when switching chats or receiving/sending a new message at bottom.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeMessages.length, activeConversationId]);
+  }, [lastMessageId, activeConversationId]);
 
   // Cleanup staged attachment preview URL on unmount/change.
   useEffect(() => {
@@ -687,6 +852,23 @@ export default function ChatWorkspace({
       })
       .on("broadcast", { event: "conversation_created" }, () => {
         refreshBootstrap();
+      })
+      .on("broadcast", { event: "conversation_updated" }, ({ payload }) => {
+        if (payload?.conversationId && payload?.avatarUrl !== undefined) {
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === payload.conversationId
+                ? {
+                    ...c,
+                    avatarUrl: payload.avatarUrl,
+                    name: payload.name || c.name,
+                  }
+                : c
+            )
+          );
+        } else {
+          refreshBootstrap();
+        }
       })
       .on("broadcast", { event: "call_invite" }, ({ payload }) => {
         callSignalHandlersRef.current.onInvite?.(payload);
@@ -2029,6 +2211,7 @@ export default function ChatWorkspace({
     }
 
     const conv = data.conversation;
+    persistCachedNewChat(conv);
     setConversations((prev) => {
       if (prev.some((c) => c.id === conv.id)) return prev;
       return [conv, ...prev];
@@ -2043,7 +2226,7 @@ export default function ChatWorkspace({
     });
   }
 
-  async function handleCreateGroup({ name, memberIds }) {
+  async function handleCreateGroup({ name, memberIds, avatarFile = null }) {
     if (!chatTablesReady) {
       const localGroupId = `group:${Date.now()}`;
       const localConv = {
@@ -2058,23 +2241,39 @@ export default function ChatWorkspace({
           .filter(Boolean),
         lastMessage: null,
       };
+      persistCachedNewChat(localConv);
       setConversations((prev) => [localConv, ...prev]);
       setActiveConversationId(localGroupId);
       setMessagesByConv((prev) => ({ ...prev, [localGroupId]: [] }));
       return;
     }
 
-    const res = await fetch("/api/chat/conversations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "group", name, memberIds }),
-    });
+    let res;
+    if (avatarFile) {
+      const formData = new FormData();
+      formData.append("type", "group");
+      formData.append("name", name);
+      formData.append("memberIds", JSON.stringify(memberIds));
+      formData.append("avatar", avatarFile);
+      res = await fetch("/api/chat/conversations", {
+        method: "POST",
+        body: formData,
+      });
+    } else {
+      res = await fetch("/api/chat/conversations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "group", name, memberIds }),
+      });
+    }
+
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       throw new Error(data?.error || "Unable to create group.");
     }
 
     const conv = data.conversation;
+    persistCachedNewChat(conv);
     setConversations((prev) => [conv, ...prev]);
     setActiveConversationId(conv.id);
     setMessagesByConv((prev) => ({ ...prev, [conv.id]: [] }));
@@ -2083,6 +2282,44 @@ export default function ChatWorkspace({
       type: "broadcast",
       event: "conversation_created",
       payload: { conversationId: conv.id },
+    });
+  }
+
+  async function handleUpdateGroupAvatar(conversationId, file) {
+    if (!conversationId || !file) return;
+    if (String(conversationId).startsWith("group:")) {
+      throw new Error("Send a message or set up database tables before uploading a group photo.");
+    }
+
+    const formData = new FormData();
+    formData.append("conversationId", conversationId);
+    formData.append("avatar", file);
+
+    const res = await fetch("/api/chat/conversations", {
+      method: "PATCH",
+      body: formData,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.error || "Unable to update group photo.");
+    }
+
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === conversationId
+          ? { ...c, avatarUrl: data.avatarUrl, name: data.name || c.name }
+          : c
+      )
+    );
+
+    globalChannelRef.current?.send({
+      type: "broadcast",
+      event: "conversation_updated",
+      payload: {
+        conversationId,
+        avatarUrl: data.avatarUrl,
+        name: data.name,
+      },
     });
   }
 
@@ -2660,8 +2897,19 @@ export default function ChatWorkspace({
           </div>
         </div>
 
-        {/* Chat List / Call History */}
-        <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
+        {/* Chat List / Call History (10 per paginated retrieval + skeleton loading) */}
+        <div
+          onScroll={(e) => {
+            if (filterTab === "calls" || !hasMoreConversations || isLoadingMoreConvs) {
+              return;
+            }
+            const el = e.currentTarget;
+            if (el.scrollHeight - el.scrollTop - el.clientHeight < 120) {
+              loadMoreConversations();
+            }
+          }}
+          className="flex-1 overflow-y-auto px-2 py-2 space-y-1"
+        >
           {filterTab === "calls" ? (
             <div className="space-y-4">
               {(() => {
@@ -3084,6 +3332,20 @@ export default function ChatWorkspace({
                 </div>
               )}
 
+              {isLoadingMoreConvs && <ConversationListSkeleton count={4} />}
+
+              {hasMoreConversations && !isLoadingMoreConvs && (
+                <div className="pt-2 pb-1 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={loadMoreConversations}
+                    className="rounded-full border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-[#0b141a] px-4 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition cursor-pointer"
+                  >
+                    Load 10 more chats
+                  </button>
+                </div>
+              )}
+
               {filteredConversations.length === 0 &&
                 discoverableUsers.length === 0 && (
                   <p className="py-10 text-center text-xs text-neutral-500 dark:text-neutral-400">
@@ -3289,13 +3551,22 @@ export default function ChatWorkspace({
 
             {/* Messages Timeline */}
             <div
+              ref={messagesScrollRef}
+              onScroll={(e) => {
+                if (
+                  e.currentTarget.scrollTop < 40 &&
+                  hasMoreMsgsByConv[activeConversation.id] &&
+                  !isLoadingOlderMessages &&
+                  !isLoadingMessages
+                ) {
+                  loadOlderMessages(activeConversation.id);
+                }
+              }}
               className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-3 transition-[background] duration-300"
               style={{ background: activeWallpaper.background }}
             >
               {isLoadingMessages && activeMessages.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-xs text-neutral-500">
-                  Loading messages...
-                </div>
+                <MessagesTimelineSkeleton />
               ) : activeMessages.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center px-4">
                   <div className="rounded-3xl bg-white/80 dark:bg-[#111b21]/80 backdrop-blur-xs px-6 py-5 border border-black/5 dark:border-white/10">
@@ -3308,17 +3579,40 @@ export default function ChatWorkspace({
                   </div>
                 </div>
               ) : (
-                activeMessages.map((msg) => (
-                  <MessageBubble
-                    key={msg.id}
-                    message={msg}
-                    isMine={msg.sender_id === currentUser.id}
-                    isGroup={activeInfo.isGroup}
-                    senderProfile={usersById.get(msg.sender_id)}
-                    receiptStatus={getMessageReceiptStatus(msg)}
-                    accentColor={activeWallpaper.bubbleColor}
-                  />
-                ))
+                <>
+                  {isLoadingOlderMessages && (
+                    <div className="py-2">
+                      <MessagesTimelineSkeleton />
+                    </div>
+                  )}
+
+                  {hasMoreMsgsByConv[activeConversation.id] &&
+                    !isLoadingOlderMessages && (
+                      <div className="flex justify-center pb-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            loadOlderMessages(activeConversation.id)
+                          }
+                          className="rounded-full bg-white/85 dark:bg-[#111b21]/85 border border-black/10 dark:border-white/10 px-4 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-200 hover:bg-white dark:hover:bg-[#1a242b] shadow-2xs transition cursor-pointer"
+                        >
+                          Load previous 10 messages
+                        </button>
+                      </div>
+                    )}
+
+                  {activeMessages.map((msg) => (
+                    <MessageBubble
+                      key={msg.id}
+                      message={msg}
+                      isMine={msg.sender_id === currentUser.id}
+                      isGroup={activeInfo.isGroup}
+                      senderProfile={usersById.get(msg.sender_id)}
+                      receiptStatus={getMessageReceiptStatus(msg)}
+                      accentColor={activeWallpaper.bubbleColor}
+                    />
+                  ))}
+                </>
               )}
               <div ref={messagesEndRef} />
             </div>
@@ -3518,6 +3812,7 @@ export default function ChatWorkspace({
           setIsInfoDrawerOpen(false);
           handleStartDirectChat(memberId);
         }}
+        onUpdateGroupAvatar={handleUpdateGroupAvatar}
       />
 
       <NewGroupModal

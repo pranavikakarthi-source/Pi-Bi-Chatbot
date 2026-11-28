@@ -1,4 +1,9 @@
 import { NextResponse } from "next/server";
+import {
+  getCachedNewChats,
+  getConvsPageCacheKey,
+  setCachedJson,
+} from "@/lib/cache/redis";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import {
@@ -33,17 +38,31 @@ export async function GET() {
 
     const otherUsers = allUsers.filter((u) => u.id !== user.id);
 
-    const [{ conversations, chatTablesReady }, { callLogs }] = await Promise.all([
-      listUserConversations(adminSupabase, user.id, usersById),
+    const [convPage, { callLogs }, cachedNewChats] = await Promise.all([
+      listUserConversations(adminSupabase, user.id, usersById, {
+        offset: 0,
+        limit: 10,
+      }),
       listUserCallLogs(adminSupabase, user.id),
+      getCachedNewChats(user.id),
     ]);
+
+    await setCachedJson(getConvsPageCacheKey(user.id, 0, 10), convPage, 45);
+
+    const seenIds = new Set(convPage.conversations.map((c) => c.id));
+    const mergedConversations = [
+      ...convPage.conversations,
+      ...cachedNewChats.filter((c) => c?.id && !seenIds.has(c.id)),
+    ].slice(0, 10);
 
     return NextResponse.json({
       ok: true,
       currentUser,
       users: otherUsers,
-      conversations,
-      chatTablesReady,
+      conversations: mergedConversations,
+      chatTablesReady: convPage.chatTablesReady,
+      hasMoreConversations: convPage.hasMore,
+      nextConversationsOffset: convPage.nextOffset,
       callLogs,
     });
   } catch (err) {

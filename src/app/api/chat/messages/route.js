@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { invalidateUserConversationCaches } from "@/lib/cache/redis";
 import { sendPushToConversationMembers } from "@/lib/notifications/push";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -6,6 +7,7 @@ import { ensurePublicBucket } from "@/lib/supabase/storage";
 import {
   isChatSchemaPendingError,
   isUserParticipant,
+  listConversationMessages,
 } from "@/lib/supabase/chat";
 
 const CHAT_MEDIA_BUCKET = "chat-media";
@@ -54,6 +56,13 @@ export async function GET(request) {
 
     const { searchParams } = new URL(request.url);
     const conversationId = String(searchParams.get("conversationId") || "").trim();
+    const before = searchParams.get("before")
+      ? String(searchParams.get("before")).trim()
+      : null;
+    const limit = Math.max(
+      1,
+      Math.min(10, Number(searchParams.get("limit") || 10) || 10)
+    );
 
     if (!conversationId) {
       return NextResponse.json(
@@ -73,6 +82,8 @@ export async function GET(request) {
       return NextResponse.json({
         ok: true,
         messages: [],
+        hasMore: false,
+        nextBefore: null,
         chatTablesReady: false,
       });
     }
@@ -81,20 +92,17 @@ export async function GET(request) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
-    const { data: messages, error: msgErr } = await adminSupabase
-      .from("messages")
-      .select("*")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true })
-      .limit(250);
-
-    if (msgErr) {
-      return NextResponse.json({ error: msgErr.message }, { status: 500 });
-    }
+    const { messages, hasMore, nextBefore } = await listConversationMessages(
+      adminSupabase,
+      conversationId,
+      { limit, before }
+    );
 
     return NextResponse.json({
       ok: true,
-      messages: messages || [],
+      messages,
+      hasMore,
+      nextBefore,
       chatTablesReady: true,
     });
   } catch (err) {
@@ -309,11 +317,21 @@ export async function POST(request) {
             ? `📄 ${mediaName || "Sent a document"}`
             : content;
 
-    const { data: convInfo } = await adminSupabase
-      .from("conversations")
-      .select("type, name")
-      .eq("id", conversationId)
-      .maybeSingle();
+    const [{ data: convInfo }, { data: convParticipants }] = await Promise.all([
+      adminSupabase
+        .from("conversations")
+        .select("type, name")
+        .eq("id", conversationId)
+        .maybeSingle(),
+      adminSupabase
+        .from("conversation_participants")
+        .select("user_id")
+        .eq("conversation_id", conversationId),
+    ]);
+
+    await invalidateUserConversationCaches(
+      (convParticipants || []).map((p) => p.user_id)
+    ).catch(() => {});
 
     await sendPushToConversationMembers({
       adminSupabase,

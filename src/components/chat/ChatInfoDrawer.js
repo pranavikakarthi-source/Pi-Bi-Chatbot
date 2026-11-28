@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { extractLinksFromText } from "@/lib/chat/links";
 import AvatarBadge from "./AvatarBadge";
@@ -20,9 +20,13 @@ export default function ChatInfoDrawer({
   currentUserId,
   onlineUserIds,
   onSelectMember,
+  onUpdateGroupAvatar,
 }) {
   const [activeTab, setActiveTab] = useState("overview"); // "overview" | "media" | "docs" | "links"
   const [lightboxItem, setLightboxItem] = useState(null); // { url, type, name }
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+  const [avatarError, setAvatarError] = useState("");
+  const groupPhotoInputRef = useRef(null);
 
   const mediaItems = useMemo(
     () =>
@@ -170,6 +174,60 @@ export default function ChatInfoDrawer({
               <h3 className="mt-3.5 text-lg font-semibold text-neutral-900 dark:text-neutral-100">
                 {title}
               </h3>
+
+              {isGroup && onUpdateGroupAvatar && (
+                <div className="mt-2.5 flex flex-col items-center gap-1">
+                  <input
+                    ref={groupPhotoInputRef}
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,image/gif"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = "";
+                      if (!file) return;
+                      if (!file.type.startsWith("image/")) {
+                        setAvatarError("Group photo must be JPG, PNG, WebP, or GIF.");
+                        return;
+                      }
+                      if (file.size > 5 * 1024 * 1024) {
+                        setAvatarError("Group photo must be 5 MB or smaller.");
+                        return;
+                      }
+                      setAvatarError("");
+                      setIsUploadingAvatar(true);
+                      try {
+                        await onUpdateGroupAvatar(conversation.id, file);
+                      } catch (err) {
+                        setAvatarError(
+                          err instanceof Error
+                            ? err.message
+                            : "Unable to update group photo."
+                        );
+                      } finally {
+                        setIsUploadingAvatar(false);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    disabled={isUploadingAvatar}
+                    onClick={() => groupPhotoInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-[#2b8c98]/35 bg-[#2b8c98]/10 px-3 py-1 text-xs font-medium text-[#2b8c98] hover:bg-[#2b8c98]/20 transition cursor-pointer disabled:opacity-50"
+                  >
+                    <span>
+                      {isUploadingAvatar
+                        ? "Updating photo..."
+                        : avatarUrl
+                          ? "Change group photo"
+                          : "Add group photo"}
+                    </span>
+                  </button>
+                  {avatarError && (
+                    <p className="text-[11px] text-red-500">{avatarError}</p>
+                  )}
+                </div>
+              )}
 
               {isGroup ? (
                 <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
