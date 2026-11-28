@@ -1,21 +1,24 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { syncUserRecord } from "@/lib/supabase/users";
+import { getFirstZodError, loginSchema } from "@/lib/validation/schemas";
 
 export async function POST(request) {
   try {
     const body = await request.json();
-    const email = String(body?.email || "")
-      .trim()
-      .toLowerCase();
-    const password = String(body?.password || "");
+    const parsed = loginSchema.safeParse({
+      email: body?.email,
+      password: body?.password,
+    });
 
-    if (!email || !password) {
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "Email and password are required." },
+        { error: getFirstZodError(parsed, "Email and password are required.") },
         { status: 400 }
       );
     }
+
+    const { email, password } = parsed.data;
 
     const supabase = await createClient();
     const { data, error } = await supabase.auth.signInWithPassword({

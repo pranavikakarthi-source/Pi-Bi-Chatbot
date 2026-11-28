@@ -1234,8 +1234,8 @@ export default function ChatWorkspace({
         participants: participantList,
         callType,
         isGroup,
-        title,
-        avatarUrl,
+        title: isGroup ? title : currentUser.displayName,
+        avatarUrl: isGroup ? avatarUrl : currentUser.avatarUrl || "",
       },
     });
 
@@ -1312,13 +1312,22 @@ export default function ChatWorkspace({
         : [currentUser]),
     ];
 
+    const isIncomingGroup = Boolean(invite.isGroup);
+    const callerInfo = invite.caller?.id
+      ? usersById.get(invite.caller.id) || invite.caller
+      : invite.caller;
+
     const callSession = {
       callId: invite.callId,
       conversationId: invite.conversationId || null,
       callType: invite.callType,
-      isGroup: Boolean(invite.isGroup),
-      title: invite.title || invite.caller?.displayName || "Call",
-      avatarUrl: invite.avatarUrl || invite.caller?.avatarUrl || "",
+      isGroup: isIncomingGroup,
+      title: isIncomingGroup
+        ? invite.title || callerInfo?.displayName || "Group Call"
+        : callerInfo?.displayName || invite.title || "Call",
+      avatarUrl: isIncomingGroup
+        ? invite.avatarUrl || callerInfo?.avatarUrl || ""
+        : callerInfo?.avatarUrl || invite.avatarUrl || "",
       direction: "incoming",
       status: "connected",
       participants: participantList,
@@ -1598,6 +1607,10 @@ export default function ChatWorkspace({
     activeCallRef.current = updatedCall;
     setActiveCall(updatedCall);
 
+    const inviteTitle = call.isGroup
+      ? call.title
+      : `${currentUser.displayName} & ${call.title}`;
+
     globalChannelRef.current?.send({
       type: "broadcast",
       event: "call_invite",
@@ -1609,8 +1622,8 @@ export default function ChatWorkspace({
         participants: updatedParticipants,
         callType: call.callType,
         isGroup: true,
-        title: call.title,
-        avatarUrl: call.avatarUrl,
+        title: inviteTitle,
+        avatarUrl: call.isGroup ? call.avatarUrl : currentUser.avatarUrl || "",
       },
     });
   }
@@ -1635,6 +1648,17 @@ export default function ChatWorkspace({
           return;
         }
 
+        const callerProfile = payload.caller?.id
+          ? usersById.get(payload.caller.id) || payload.caller
+          : payload.caller;
+        const isGroupInvite = Boolean(payload.isGroup);
+        const incomingTitle = isGroupInvite
+          ? payload.title || callerProfile?.displayName || "Group Call"
+          : callerProfile?.displayName || payload.title || "Incoming Call";
+        const incomingAvatar = isGroupInvite
+          ? payload.avatarUrl || callerProfile?.avatarUrl || ""
+          : callerProfile?.avatarUrl || payload.avatarUrl || "";
+
         const localLog = {
           id: payload.callId,
           call_id: payload.callId,
@@ -1642,8 +1666,8 @@ export default function ChatWorkspace({
           caller_id: payload.caller?.id,
           callee_ids: payload.calleeIds,
           call_type: payload.callType === "video" ? "video" : "audio",
-          is_group: Boolean(payload.isGroup),
-          title: payload.title || payload.caller?.displayName || "Call",
+          is_group: isGroupInvite,
+          title: incomingTitle,
           status: "ringing",
           started_at: new Date().toISOString(),
           duration_seconds: 0,
@@ -1656,17 +1680,22 @@ export default function ChatWorkspace({
           return next;
         });
 
-        setIncomingCall(payload);
+        setIncomingCall({
+          ...payload,
+          caller: callerProfile,
+          title: incomingTitle,
+          avatarUrl: incomingAvatar,
+        });
         stopRingtonePlayback();
         ringtoneStopRef.current = startRingtone("incoming");
 
         showBrowserDesktopNotification({
-          title: payload.title || payload.caller?.displayName || "Incoming Call",
+          title: incomingTitle,
           body:
             payload.callType === "video"
               ? "Incoming video call..."
               : "Incoming voice call...",
-          icon: payload.avatarUrl || payload.caller?.avatarUrl || "",
+          icon: incomingAvatar,
           conversationId: payload.conversationId,
         });
 

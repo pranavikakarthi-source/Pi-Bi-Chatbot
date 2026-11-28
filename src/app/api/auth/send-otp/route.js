@@ -9,8 +9,7 @@ import {
   OTP_EXPIRY_MS,
   signSessionPayload,
 } from "@/lib/auth/otp";
-
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+import { getFirstZodError, sendOtpSchema } from "@/lib/validation/schemas";
 
 async function isEmailRegistered(adminSupabase, targetEmail) {
   const { data, error } = await adminSupabase.auth.admin.listUsers({
@@ -30,16 +29,16 @@ async function isEmailRegistered(adminSupabase, targetEmail) {
 export async function POST(request) {
   try {
     const body = await request.json();
-    const normalizedEmail = String(body?.email || "")
-      .trim()
-      .toLowerCase();
+    const parsed = sendOtpSchema.safeParse({ email: body?.email });
 
-    if (!EMAIL_REGEX.test(normalizedEmail)) {
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "Please enter a valid email address." },
+        { error: getFirstZodError(parsed, "Please enter a valid email address.") },
         { status: 400 }
       );
     }
+
+    const normalizedEmail = parsed.data.email;
 
     const adminSupabase = createAdminClient();
     const alreadyExists = await isEmailRegistered(adminSupabase, normalizedEmail);

@@ -7,26 +7,24 @@ import {
   VERIFIED_COOKIE_NAME,
   verifySignedSessionToken,
 } from "@/lib/auth/otp";
+import { completeSignupSchema, getFirstZodError } from "@/lib/validation/schemas";
 
 export async function POST(request) {
   try {
     const body = await request.json();
-    const password = String(body?.password || "");
-    const confirmPassword = String(body?.confirmPassword || "");
+    const parsed = completeSignupSchema.safeParse({
+      password: body?.password,
+      confirmPassword: body?.confirmPassword,
+    });
 
-    if (password.length < 6) {
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "Password must contain at least 6 characters." },
+        { error: getFirstZodError(parsed, "Invalid password details.") },
         { status: 400 }
       );
     }
 
-    if (password !== confirmPassword) {
-      return NextResponse.json(
-        { error: "Passwords do not match." },
-        { status: 400 }
-      );
-    }
+    const { password } = parsed.data;
 
     const cookieStore = await cookies();
     const verifiedToken = cookieStore.get(VERIFIED_COOKIE_NAME)?.value;

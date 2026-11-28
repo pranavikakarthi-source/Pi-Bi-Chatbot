@@ -3,6 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import {
+  completeSignupSchema,
+  getFirstZodError,
+  sendOtpSchema,
+  verifyOtpSchema,
+} from "@/lib/validation/schemas";
 import AuthBoxShell from "./AuthBoxShell";
 import EyeIcon from "./EyeIcon";
 
@@ -107,9 +113,18 @@ export default function SignUpFlow() {
     event.preventDefault();
     setErrorMessage("");
     setStatusMessage("");
+
+    const parsed = sendOtpSchema.safeParse({ email });
+    if (!parsed.success) {
+      setErrorMessage(
+        getFirstZodError(parsed, "Please enter a valid email address.")
+      );
+      return;
+    }
+
     setIsLoading(true);
 
-    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedEmail = parsed.data.email;
     try {
       await postJson("/api/auth/send-otp", { email: normalizedEmail });
       setEmail(normalizedEmail);
@@ -220,16 +235,20 @@ export default function SignUpFlow() {
     setStatusMessage("");
 
     const token = otpDigits.join("");
-    if (token.length !== OTP_LENGTH) {
+    const parsed = verifyOtpSchema.safeParse({ email, otp: token });
+    if (!parsed.success) {
       setErrorMessage(
-        `Please enter the ${OTP_LENGTH}-digit OTP sent to your email.`
+        getFirstZodError(
+          parsed,
+          `Please enter the ${OTP_LENGTH}-digit OTP sent to your email.`
+        )
       );
       return;
     }
 
     setIsLoading(true);
     try {
-      await postJson("/api/auth/verify-otp", { email, otp: token });
+      await postJson("/api/auth/verify-otp", parsed.data);
       setStep("password");
     } catch (err) {
       setErrorMessage(
@@ -245,22 +264,18 @@ export default function SignUpFlow() {
     setErrorMessage("");
     setStatusMessage("");
 
-    if (password.length < 6) {
-      setErrorMessage("Password must contain at least 6 characters.");
-      return;
-    }
-
-    if (password !== confirmPassword) {
-      setErrorMessage("Passwords do not match.");
+    const parsed = completeSignupSchema.safeParse({
+      password,
+      confirmPassword,
+    });
+    if (!parsed.success) {
+      setErrorMessage(getFirstZodError(parsed, "Invalid password details."));
       return;
     }
 
     setIsLoading(true);
     try {
-      await postJson("/api/auth/complete-signup", {
-        password,
-        confirmPassword,
-      });
+      await postJson("/api/auth/complete-signup", parsed.data);
 
       router.push("/profile-setup");
       router.refresh();
@@ -357,7 +372,7 @@ export default function SignUpFlow() {
         </div>
 
         {step === "email" && (
-          <form onSubmit={handleSendOtp} className="space-y-5">
+          <form noValidate onSubmit={handleSendOtp} className="space-y-5">
             <div>
               <label
                 htmlFor="signup-email"

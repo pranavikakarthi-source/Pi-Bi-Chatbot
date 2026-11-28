@@ -3,6 +3,7 @@
 import { useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { getFirstZodError, loginSchema } from "@/lib/validation/schemas";
 import AuthBoxShell from "./AuthBoxShell";
 import EyeIcon from "./EyeIcon";
 
@@ -47,16 +48,22 @@ export default function AuthForm() {
   async function handleSubmit(event) {
     event.preventDefault();
     setErrorMessage("");
+
+    const parsed = loginSchema.safeParse({ email, password });
+    if (!parsed.success) {
+      setErrorMessage(
+        getFirstZodError(parsed, "Please enter a valid email and password.")
+      );
+      return;
+    }
+
     setIsLoading(true);
 
     try {
       const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: email.trim(),
-          password,
-        }),
+        body: JSON.stringify(parsed.data),
       });
 
       const data = await response.json().catch(() => ({}));
@@ -104,7 +111,7 @@ export default function AuthForm() {
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-5">
+        <form noValidate onSubmit={handleSubmit} className="space-y-5">
           <div>
             <label
               htmlFor="email"

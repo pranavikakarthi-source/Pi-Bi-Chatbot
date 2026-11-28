@@ -11,21 +11,24 @@ import {
   VERIFIED_EXPIRY_MS,
   verifySignedSessionToken,
 } from "@/lib/auth/otp";
+import { getFirstZodError, verifyOtpSchema } from "@/lib/validation/schemas";
 
 export async function POST(request) {
   try {
     const body = await request.json();
-    const normalizedEmail = String(body?.email || "")
-      .trim()
-      .toLowerCase();
-    const otp = String(body?.otp || "").trim();
+    const parsed = verifyOtpSchema.safeParse({
+      email: body?.email,
+      otp: body?.otp,
+    });
 
-    if (!/^\d{6}$/.test(otp)) {
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "Please enter a valid 6-digit OTP." },
+        { error: getFirstZodError(parsed, "Please enter a valid 6-digit OTP.") },
         { status: 400 }
       );
     }
+
+    const { email: normalizedEmail, otp } = parsed.data;
 
     const cookieStore = await cookies();
     const sessionToken = cookieStore.get(OTP_COOKIE_NAME)?.value;

@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { ensurePublicBucket } from "@/lib/supabase/storage";
 import { getUserRecordById, syncUserRecord } from "@/lib/supabase/users";
+import { getFirstZodError, profileSetupSchema } from "@/lib/validation/schemas";
 
 const AVATAR_BUCKET = "avatars";
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
@@ -12,35 +13,6 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/webp",
   "image/gif",
 ]);
-
-function isValidUsername(value) {
-  return /^[a-zA-Z0-9_.]{3,30}$/.test(value);
-}
-
-function isValidPhone(value) {
-  const digits = value.replace(/\D/g, "");
-  return /^[+\d][\d\s()-]{6,20}$/.test(value) && digits.length >= 7 && digits.length <= 15;
-}
-
-function isValidDob(value) {
-  const match = /^(\d{2})-(\d{2})-(\d{4})$/.exec(value);
-  if (!match) return false;
-  const day = Number(match[1]);
-  const month = Number(match[2]);
-  const year = Number(match[3]);
-  const currentYear = new Date().getFullYear();
-
-  if (year < 1900 || year > currentYear || month < 1 || month > 12 || day < 1) {
-    return false;
-  }
-
-  const parsed = new Date(year, month - 1, day);
-  return (
-    parsed.getFullYear() === year &&
-    parsed.getMonth() === month - 1 &&
-    parsed.getDate() === day
-  );
-}
 
 export async function GET() {
   try {
@@ -96,50 +68,23 @@ export async function POST(request) {
     }
 
     const formData = await request.formData();
-    const username = String(formData.get("username") || "").trim();
-    const fullName = String(formData.get("fullName") || "").trim();
-    const phone = String(formData.get("phone") || "").trim();
-    const about = String(formData.get("about") || "").trim();
-    const dateOfBirth = String(formData.get("dateOfBirth") || "").trim();
+    const parsed = profileSetupSchema.safeParse({
+      username: formData.get("username"),
+      fullName: formData.get("fullName"),
+      phone: formData.get("phone"),
+      about: formData.get("about") ?? "",
+      dateOfBirth: formData.get("dateOfBirth"),
+    });
+
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: getFirstZodError(parsed, "Please check your profile details.") },
+        { status: 400 }
+      );
+    }
+
+    const { username, fullName, phone, about, dateOfBirth } = parsed.data;
     const avatarFile = formData.get("avatar");
-
-    if (!isValidUsername(username)) {
-      return NextResponse.json(
-        {
-          error:
-            "Username must be 3–30 characters using letters, numbers, underscores, or dots.",
-        },
-        { status: 400 }
-      );
-    }
-
-    if (fullName.length < 2) {
-      return NextResponse.json(
-        { error: "Please enter your name (at least 2 characters)." },
-        { status: 400 }
-      );
-    }
-
-    if (!isValidPhone(phone)) {
-      return NextResponse.json(
-        { error: "Please enter a valid phone number." },
-        { status: 400 }
-      );
-    }
-
-    if (about.length > 160) {
-      return NextResponse.json(
-        { error: "About must be 160 characters or fewer." },
-        { status: 400 }
-      );
-    }
-
-    if (!isValidDob(dateOfBirth)) {
-      return NextResponse.json(
-        { error: "Please enter a valid Date of Birth in dd-mm-yyyy format." },
-        { status: 400 }
-      );
-    }
 
     const adminSupabase = createAdminClient();
     let avatarUrl = user.user_metadata?.avatar_url ?? null;

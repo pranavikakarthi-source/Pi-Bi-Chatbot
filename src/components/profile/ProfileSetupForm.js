@@ -4,44 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import AuthBoxShell from "@/components/auth/AuthBoxShell";
-
-function validateUsername(value) {
-  return /^[a-zA-Z0-9_.]{3,30}$/.test(value.trim());
-}
-
-function validateName(value) {
-  return value.trim().length >= 2;
-}
-
-function validatePhone(value) {
-  const trimmed = value.trim();
-  const digits = trimmed.replace(/\D/g, "");
-  return (
-    /^[+\d][\d\s()-]{6,20}$/.test(trimmed) &&
-    digits.length >= 7 &&
-    digits.length <= 15
-  );
-}
-
-function validateDob(value) {
-  const match = /^(\d{2})-(\d{2})-(\d{4})$/.exec(value.trim());
-  if (!match) return false;
-  const day = Number(match[1]);
-  const month = Number(match[2]);
-  const year = Number(match[3]);
-  const currentYear = new Date().getFullYear();
-
-  if (year < 1900 || year > currentYear || month < 1 || month > 12 || day < 1) {
-    return false;
-  }
-
-  const parsed = new Date(year, month - 1, day);
-  return (
-    parsed.getFullYear() === year &&
-    parsed.getMonth() === month - 1 &&
-    parsed.getDate() === day
-  );
-}
+import {
+  getFirstZodError,
+  isValidCalendarDob,
+  phoneSchema,
+  profileSetupSchema,
+  usernameSchema,
+} from "@/lib/validation/schemas";
 
 function formatDobInput(rawValue) {
   const digits = rawValue.replace(/\D/g, "").slice(0, 8);
@@ -139,13 +108,18 @@ export default function ProfileSetupForm({ initialProfile }) {
 
   const previewUrl = localPreviewUrl || initialProfile?.avatarUrl || "";
 
-  const isUsernameValid = validateUsername(username);
-  const isNameValid = validateName(fullName);
-  const isPhoneValid = validatePhone(phone);
+  const isUsernameValid = usernameSchema.safeParse(username).success;
+  const isNameValid = fullName.trim().length >= 2 && fullName.trim().length <= 80;
+  const isPhoneValid = phoneSchema.safeParse(phone).success;
   const isAboutValid = about.trim().length >= 2 && about.trim().length <= 160;
-  const isDobValid = validateDob(dateOfBirth);
-  const isFormComplete =
-    isUsernameValid && isNameValid && isPhoneValid && isDobValid;
+  const isDobValid = isValidCalendarDob(dateOfBirth);
+  const isFormComplete = profileSetupSchema.safeParse({
+    username,
+    fullName,
+    phone,
+    about,
+    dateOfBirth,
+  }).success;
 
   function handleAvatarSelect(event) {
     const file = event.target.files?.[0];
@@ -171,18 +145,32 @@ export default function ProfileSetupForm({ initialProfile }) {
 
   async function handleSubmit(event) {
     event.preventDefault();
-    if (!isFormComplete || isSaving) return;
+    if (isSaving) return;
+
+    const parsed = profileSetupSchema.safeParse({
+      username,
+      fullName,
+      phone,
+      about,
+      dateOfBirth,
+    });
+    if (!parsed.success) {
+      setErrorMessage(
+        getFirstZodError(parsed, "Please enter valid profile details.")
+      );
+      return;
+    }
 
     setErrorMessage("");
     setIsSaving(true);
 
     try {
       const formData = new FormData();
-      formData.append("username", username.trim());
-      formData.append("fullName", fullName.trim());
-      formData.append("phone", phone.trim());
-      formData.append("about", about.trim());
-      formData.append("dateOfBirth", dateOfBirth.trim());
+      formData.append("username", parsed.data.username);
+      formData.append("fullName", parsed.data.fullName);
+      formData.append("phone", parsed.data.phone);
+      formData.append("about", parsed.data.about);
+      formData.append("dateOfBirth", parsed.data.dateOfBirth);
       if (avatarFile) {
         formData.append("avatar", avatarFile);
       }
@@ -327,16 +315,24 @@ export default function ProfileSetupForm({ initialProfile }) {
               isValid={isNameValid}
             />
 
-            <ProfileUnderlineField
-              id="profile-phone"
-              label="Phone Number"
-              type="tel"
-              inputMode="tel"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder="+91 9876543210"
-              isValid={isPhoneValid}
-            />
+            <div>
+              <ProfileUnderlineField
+                id="profile-phone"
+                label="Phone Number"
+                type="tel"
+                inputMode="numeric"
+                maxLength={10}
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="10-digit mobile number"
+                isValid={isPhoneValid}
+              />
+              {phone.length > 0 && !isPhoneValid && (
+                <p className="mt-1 text-[11.5px] text-amber-600 dark:text-amber-400">
+                  Phone number must be exactly 10 digits.
+                </p>
+              )}
+            </div>
 
             <ProfileUnderlineField
               id="profile-about"

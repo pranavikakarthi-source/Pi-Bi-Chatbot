@@ -98,6 +98,13 @@ export default function CallOverlay({
 
   // 1. Incoming Call Ringing Card
   if (incomingCall && !activeCall) {
+    const incomingDisplayName = incomingCall.isGroup
+      ? incomingCall.title || incomingCall.caller?.displayName || "Group Call"
+      : incomingCall.caller?.displayName || incomingCall.title || "Incoming Call";
+    const incomingDisplayAvatar = incomingCall.isGroup
+      ? incomingCall.avatarUrl || incomingCall.caller?.avatarUrl
+      : incomingCall.caller?.avatarUrl || incomingCall.avatarUrl;
+
     const subtitle =
       incomingCall.callType === "video"
         ? incomingCall.isGroup
@@ -118,15 +125,15 @@ export default function CallOverlay({
             <span className="absolute inset-0 rounded-full bg-emerald-500/20 animate-ping" />
             <span className="absolute inset-2 rounded-full bg-emerald-500/20 animate-pulse" />
             <AvatarBadge
-              src={incomingCall.avatarUrl || incomingCall.caller?.avatarUrl}
-              name={incomingCall.title || incomingCall.caller?.displayName}
+              src={incomingDisplayAvatar}
+              name={incomingDisplayName}
               isGroup={incomingCall.isGroup}
               size="lg"
             />
           </div>
 
           <h2 className="text-xl font-bold tracking-tight truncate">
-            {incomingCall.title || incomingCall.caller?.displayName || "Incoming Call"}
+            {incomingDisplayName}
           </h2>
           {incomingCall.isGroup && incomingCall.caller?.displayName && (
             <p className="mt-1 text-xs text-neutral-400">
