@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   listAllChatUsers,
+  listUserCallLogs,
   listUserConversations,
 } from "@/lib/supabase/chat";
 import { createClient } from "@/lib/supabase/server";
@@ -50,11 +51,10 @@ async function AuthenticatedChatApp() {
 
   const otherUsers = allUsers.filter((u) => u.id !== user.id);
 
-  const { conversations, chatTablesReady } = await listUserConversations(
-    adminSupabase,
-    user.id,
-    usersById
-  );
+  const [{ conversations, chatTablesReady }, { callLogs }] = await Promise.all([
+    listUserConversations(adminSupabase, user.id, usersById),
+    listUserCallLogs(adminSupabase, user.id),
+  ]);
 
   let initialMessages = [];
   if (chatTablesReady && conversations[0]?.id) {
@@ -87,6 +87,7 @@ async function AuthenticatedChatApp() {
       initialMessages={initialMessages}
       initialChatTablesReady={chatTablesReady}
       initialMigrationSql={initialMigrationSql}
+      initialCallLogs={callLogs}
     />
   );
 }

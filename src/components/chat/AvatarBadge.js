@@ -11,11 +11,15 @@ export default function AvatarBadge({
   size = "md",
 }) {
   const sizeClass =
-    size === "sm"
-      ? "h-9 w-9 text-xs"
-      : size === "lg"
-        ? "h-12 w-12 text-base"
-        : "h-11 w-11 text-sm";
+    size === "xs"
+      ? "h-6 w-6 text-[10px]"
+      : size === "sm"
+        ? "h-9 w-9 text-xs"
+        : size === "lg"
+          ? "h-12 w-12 text-base"
+          : size === "xl"
+            ? "h-full w-full text-3xl min-h-[96px] min-w-[96px]"
+            : "h-11 w-11 text-sm";
 
   const initial = String(name || (isGroup ? "G" : "U"))
     .trim()

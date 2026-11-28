@@ -4,10 +4,12 @@ const path = require("node:path");
 const {
   app,
   BrowserWindow,
+  desktopCapturer,
   ipcMain,
   Menu,
   nativeImage,
   Notification,
+  session,
   shell,
   Tray,
 } = require("electron");
@@ -167,6 +169,39 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(() => {
     if (process.platform === "win32") {
       app.setAppUserModelId(APP_USER_MODEL_ID);
+    }
+
+    session.defaultSession.setPermissionRequestHandler(
+      (_webContents, permission, callback) => {
+        const allowed = new Set([
+          "media",
+          "mediaKeySystem",
+          "audioCapture",
+          "videoCapture",
+          "notifications",
+          "display-capture",
+        ]);
+        callback(allowed.has(permission));
+      }
+    );
+
+    if (session.defaultSession.setDisplayMediaRequestHandler) {
+      session.defaultSession.setDisplayMediaRequestHandler(
+        async (_request, callback) => {
+          try {
+            const sources = await desktopCapturer.getSources({
+              types: ["screen", "window"],
+            });
+            if (sources.length > 0) {
+              callback({ video: sources[0] });
+            } else {
+              callback({});
+            }
+          } catch {
+            callback({});
+          }
+        }
+      );
     }
 
     createTray();

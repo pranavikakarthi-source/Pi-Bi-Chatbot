@@ -18,7 +18,16 @@ import {
 } from "@/lib/notifications/browser";
 import ThemeToggle from "@/components/theme/ThemeToggle";
 import SignOutButton from "@/components/auth/SignOutButton";
+import {
+  acquireCallMedia,
+  acquireScreenShareStream,
+  formatCallDuration,
+  getRtcConfiguration,
+  startRingtone,
+  stopMediaStream,
+} from "@/lib/calling/webrtc";
 import AvatarBadge from "./AvatarBadge";
+import CallOverlay from "./CallOverlay";
 import ChatAttachmentMenu from "./ChatAttachmentMenu";
 import ChatInfoDrawer from "./ChatInfoDrawer";
 import MessageBubble from "./MessageBubble";
@@ -105,6 +114,7 @@ export default function ChatWorkspace({
   initialMessages = [],
   initialChatTablesReady,
   initialMigrationSql = "",
+  initialCallLogs = [],
 }) {
   const [currentUser, setCurrentUser] = useState(initialCurrentUser);
   const [users, setUsers] = useState(initialUsers);
@@ -124,7 +134,7 @@ export default function ChatWorkspace({
   );
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
 
-  const [filterTab, setFilterTab] = useState("all"); // "all" | "direct" | "group"
+  const [filterTab, setFilterTab] = useState("all"); // "all" | "direct" | "group" | "calls"
   const [searchQuery, setSearchQuery] = useState("");
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [isInfoDrawerOpen, setIsInfoDrawerOpen] = useState(false);
@@ -134,6 +144,33 @@ export default function ChatWorkspace({
   const [deliveredConvAt, setDeliveredConvAt] = useState({}); // { [convId]: iso }
   const [readConvAt, setReadConvAt] = useState({}); // { [convId]: iso }
   const [toastNotification, setToastNotification] = useState(null);
+
+  // Calling state & WebRTC refs
+  const [callLogs, setCallLogs] = useState(initialCallLogs);
+  const [incomingCall, setIncomingCall] = useState(null);
+  const [activeCall, setActiveCall] = useState(null);
+  const [localCallStream, setLocalCallStream] = useState(null);
+  const [remoteCallStreams, setRemoteCallStreams] = useState({});
+  const [peerCallStates, setPeerCallStates] = useState({});
+  const [callElapsedSeconds, setCallElapsedSeconds] = useState(0);
+  const [isCallMuted, setIsCallMuted] = useState(false);
+  const [isCallVideoOn, setIsCallVideoOn] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [isSpeakerOn, setIsSpeakerOn] = useState(true);
+  const [callError, setCallError] = useState("");
+
+  const activeCallRef = useRef(null);
+  const incomingCallRef = useRef(null);
+  const localCallStreamRef = useRef(null);
+  const cameraTrackRef = useRef(null);
+  const screenTrackRef = useRef(null);
+  const peerConnectionsRef = useRef(new Map());
+  const pendingIceCandidatesRef = useRef(new Map());
+  const ringtoneStopRef = useRef(null);
+  const callRingTimeoutRef = useRef(null);
+  const callDurationTimerRef = useRef(null);
+  const callDurationRef = useRef(0);
+  const callSignalHandlersRef = useRef({});
 
   const notifPermission = useSyncExternalStore(
     subscribeNotifPermission,
@@ -194,6 +231,7 @@ export default function ChatWorkspace({
       if (data.currentUser) setCurrentUser(data.currentUser);
       if (Array.isArray(data.users)) setUsers(data.users);
       if (Array.isArray(data.conversations)) setConversations(data.conversations);
+      if (Array.isArray(data.callLogs)) setCallLogs(data.callLogs);
       if (typeof data.chatTablesReady === "boolean") {
         setChatTablesReady(data.chatTablesReady);
       }
@@ -586,6 +624,27 @@ export default function ChatWorkspace({
       .on("broadcast", { event: "conversation_created" }, () => {
         refreshBootstrap();
       })
+      .on("broadcast", { event: "call_invite" }, ({ payload }) => {
+        callSignalHandlersRef.current.onInvite?.(payload);
+      })
+      .on("broadcast", { event: "call_join" }, ({ payload }) => {
+        callSignalHandlersRef.current.onJoin?.(payload);
+      })
+      .on("broadcast", { event: "call_signal" }, ({ payload }) => {
+        callSignalHandlersRef.current.onSignal?.(payload);
+      })
+      .on("broadcast", { event: "call_media_state" }, ({ payload }) => {
+        callSignalHandlersRef.current.onMediaState?.(payload);
+      })
+      .on("broadcast", { event: "call_decline" }, ({ payload }) => {
+        callSignalHandlersRef.current.onDecline?.(payload);
+      })
+      .on("broadcast", { event: "call_end" }, ({ payload }) => {
+        callSignalHandlersRef.current.onEnd?.(payload);
+      })
+      .on("broadcast", { event: "call_busy" }, ({ payload }) => {
+        callSignalHandlersRef.current.onBusy?.(payload);
+      })
       .subscribe();
 
     const dbChannel = supabase
@@ -702,6 +761,1064 @@ export default function ChatWorkspace({
     refreshBootstrap,
     usersById,
   ]);
+
+  useEffect(() => {
+    activeCallRef.current = activeCall;
+  }, [activeCall]);
+
+  useEffect(() => {
+    incomingCallRef.current = incomingCall;
+  }, [incomingCall]);
+
+  const persistLocalCallLogs = useCallback(
+    (logs) => {
+      try {
+        window.localStorage.setItem(
+          `chatbot_call_logs_${currentUser.id}`,
+          JSON.stringify(logs.slice(0, 60))
+        );
+      } catch {
+        // Ignore storage quota errors.
+      }
+    },
+    [currentUser.id]
+  );
+
+  // Merge any cached local call logs on mount if DB call_logs table is not yet created.
+  useEffect(() => {
+    let cancelled = false;
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      try {
+        const raw = window.localStorage.getItem(
+          `chatbot_call_logs_${currentUser.id}`
+        );
+        if (!raw) return;
+        const cached = JSON.parse(raw);
+        if (!Array.isArray(cached) || cached.length === 0) return;
+        setCallLogs((prev) => {
+          const seen = new Set(prev.map((l) => l.call_id));
+          const merged = [...prev];
+          cached.forEach((item) => {
+            if (item?.call_id && !seen.has(item.call_id)) {
+              seen.add(item.call_id);
+              merged.push(item);
+            }
+          });
+          return merged.sort(
+            (a, b) =>
+              new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
+          );
+        });
+      } catch {
+        // Ignore malformed cache.
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser.id]);
+
+  const stopRingtonePlayback = useCallback(() => {
+    if (ringtoneStopRef.current) {
+      ringtoneStopRef.current();
+      ringtoneStopRef.current = null;
+    }
+    if (callRingTimeoutRef.current) {
+      window.clearTimeout(callRingTimeoutRef.current);
+      callRingTimeoutRef.current = null;
+    }
+  }, []);
+
+  const updateCallLogEntry = useCallback(
+    async (callId, status, durationSeconds = 0) => {
+      if (!callId) return;
+      const now = new Date().toISOString();
+      setCallLogs((prev) => {
+        const next = prev.map((entry) =>
+          entry.call_id === callId
+            ? {
+                ...entry,
+                status,
+                answered_at:
+                  status === "answered" ? entry.answered_at || now : entry.answered_at,
+                ended_at: ["ended", "missed", "rejected"].includes(status)
+                  ? now
+                  : entry.ended_at,
+                duration_seconds: ["ended", "missed", "rejected"].includes(status)
+                  ? Math.max(0, Math.round(durationSeconds))
+                  : entry.duration_seconds,
+              }
+            : entry
+        );
+        persistLocalCallLogs(next);
+        return next;
+      });
+
+      try {
+        await fetch("/api/chat/calls", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ callId, status, durationSeconds }),
+        });
+      } catch {
+        // Ignore transient network failures.
+      }
+    },
+    [persistLocalCallLogs]
+  );
+
+  const cleanupCallResources = useCallback(() => {
+    stopRingtonePlayback();
+
+    if (callDurationTimerRef.current) {
+      window.clearInterval(callDurationTimerRef.current);
+      callDurationTimerRef.current = null;
+    }
+    callDurationRef.current = 0;
+
+    peerConnectionsRef.current.forEach((pc) => {
+      try {
+        pc.onicecandidate = null;
+        pc.ontrack = null;
+        pc.onconnectionstatechange = null;
+        pc.close();
+      } catch {
+        // Ignore close errors.
+      }
+    });
+    peerConnectionsRef.current.clear();
+    pendingIceCandidatesRef.current.clear();
+
+    stopMediaStream(localCallStreamRef.current);
+    localCallStreamRef.current = null;
+    cameraTrackRef.current = null;
+    if (screenTrackRef.current) {
+      try {
+        screenTrackRef.current.stop();
+      } catch {
+        // Ignore stop errors.
+      }
+      screenTrackRef.current = null;
+    }
+
+    setLocalCallStream(null);
+    setRemoteCallStreams({});
+    setPeerCallStates({});
+    setCallElapsedSeconds(0);
+    setIsCallMuted(false);
+    setIsCallVideoOn(false);
+    setIsScreenSharing(false);
+    setCallError("");
+    setActiveCall(null);
+  }, [stopRingtonePlayback]);
+
+  // Cleanup active call streams/peers on unmount.
+  useEffect(() => {
+    return () => {
+      cleanupCallResources();
+    };
+  }, [cleanupCallResources]);
+
+  const startCallDurationClock = useCallback(() => {
+    if (callDurationTimerRef.current) return;
+    callDurationRef.current = 0;
+    setCallElapsedSeconds(0);
+    callDurationTimerRef.current = window.setInterval(() => {
+      callDurationRef.current += 1;
+      setCallElapsedSeconds(callDurationRef.current);
+    }, 1000);
+  }, []);
+
+  const broadcastMediaState = useCallback(
+    (callId, { muted, videoOn, screenSharing }) => {
+      if (!callId || !globalChannelRef.current) return;
+      globalChannelRef.current.send({
+        type: "broadcast",
+        event: "call_media_state",
+        payload: {
+          callId,
+          userId: currentUser.id,
+          isMuted: muted,
+          isVideoOn: videoOn,
+          isScreenSharing: screenSharing,
+        },
+      });
+    },
+    [currentUser.id]
+  );
+
+  const createOrGetPeerConnection = useCallback(
+    (callId, peerUserId) => {
+      const existing = peerConnectionsRef.current.get(peerUserId);
+      if (existing) return existing;
+
+      const pc = new RTCPeerConnection(getRtcConfiguration());
+
+      if (localCallStreamRef.current) {
+        localCallStreamRef.current.getTracks().forEach((track) => {
+          pc.addTrack(track, localCallStreamRef.current);
+        });
+      }
+
+      pc.onicecandidate = (event) => {
+        if (!event.candidate || !globalChannelRef.current) return;
+        globalChannelRef.current.send({
+          type: "broadcast",
+          event: "call_signal",
+          payload: {
+            callId,
+            fromUserId: currentUser.id,
+            targetUserId: peerUserId,
+            candidate: event.candidate.toJSON(),
+          },
+        });
+      };
+
+      pc.ontrack = (event) => {
+        const incomingStream =
+          event.streams?.[0] || new MediaStream([event.track]);
+        setRemoteCallStreams((prev) => ({
+          ...prev,
+          [peerUserId]: incomingStream,
+        }));
+        setPeerCallStates((prev) => ({
+          ...prev,
+          [peerUserId]: {
+            ...(prev[peerUserId] || {}),
+            connected: true,
+          },
+        }));
+      };
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        if (state === "connected") {
+          setPeerCallStates((prev) => ({
+            ...prev,
+            [peerUserId]: {
+              ...(prev[peerUserId] || {}),
+              connected: true,
+            },
+          }));
+        } else if (state === "failed" || state === "closed") {
+          setRemoteCallStreams((prev) => {
+            if (!prev[peerUserId]) return prev;
+            const next = { ...prev };
+            delete next[peerUserId];
+            return next;
+          });
+        }
+      };
+
+      peerConnectionsRef.current.set(peerUserId, pc);
+      return pc;
+    },
+    [currentUser.id]
+  );
+
+  const sendOfferToPeer = useCallback(
+    async (callId, peerUserId) => {
+      try {
+        const pc = createOrGetPeerConnection(callId, peerUserId);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        globalChannelRef.current?.send({
+          type: "broadcast",
+          event: "call_signal",
+          payload: {
+            callId,
+            fromUserId: currentUser.id,
+            targetUserId: peerUserId,
+            description: pc.localDescription?.toJSON?.() || offer,
+          },
+        });
+      } catch {
+        setCallError("Connection negotiation failed with participant.");
+      }
+    },
+    [createOrGetPeerConnection, currentUser.id]
+  );
+
+  const renegotiateAllPeers = useCallback(async () => {
+    const call = activeCallRef.current;
+    if (!call?.callId) return;
+    const entries = Array.from(peerConnectionsRef.current.entries());
+    for (const [peerId, pc] of entries) {
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        globalChannelRef.current?.send({
+          type: "broadcast",
+          event: "call_signal",
+          payload: {
+            callId: call.callId,
+            fromUserId: currentUser.id,
+            targetUserId: peerId,
+            description: pc.localDescription?.toJSON?.() || offer,
+          },
+        });
+      } catch {
+        // Ignore single-peer renegotiation errors.
+      }
+    }
+  }, [currentUser.id]);
+
+  async function handleStartCall({
+    conversationId = null,
+    targetParticipants = [],
+    callType = "audio",
+    isGroup = false,
+    title = "Call",
+    avatarUrl = "",
+  }) {
+    if (activeCallRef.current) {
+      setCallError("You are already in an active call.");
+      return;
+    }
+
+    const validCallees = targetParticipants.filter(
+      (p) => p?.id && p.id !== currentUser.id
+    );
+    if (validCallees.length === 0) {
+      setChatError("No recipient available to call.");
+      return;
+    }
+
+    const callId = `call-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const mediaRes = await acquireCallMedia({ video: callType === "video" });
+    if (!mediaRes.stream) {
+      setChatError(mediaRes.errorMessage || "Unable to access microphone.");
+      return;
+    }
+
+    localCallStreamRef.current = mediaRes.stream;
+    cameraTrackRef.current = mediaRes.stream.getVideoTracks()[0] || null;
+    setLocalCallStream(mediaRes.stream);
+    setIsCallMuted(false);
+    setIsCallVideoOn(mediaRes.hasVideo);
+    setIsScreenSharing(false);
+    setCallError(mediaRes.errorMessage || "");
+
+    const participantList = [
+      currentUser,
+      ...validCallees.filter(
+        (p, idx, arr) => arr.findIndex((x) => x.id === p.id) === idx
+      ),
+    ];
+
+    const callSession = {
+      callId,
+      conversationId,
+      callType,
+      isGroup,
+      title,
+      avatarUrl,
+      direction: "outgoing",
+      status: "ringing",
+      participants: participantList,
+    };
+
+    activeCallRef.current = callSession;
+    setActiveCall(callSession);
+    setIncomingCall(null);
+
+    stopRingtonePlayback();
+    ringtoneStopRef.current = startRingtone("outgoing");
+
+    const calleeIds = validCallees.map((p) => p.id);
+    const localLog = {
+      id: callId,
+      call_id: callId,
+      conversation_id: conversationId,
+      caller_id: currentUser.id,
+      callee_ids: calleeIds,
+      call_type: callType,
+      is_group: isGroup,
+      title,
+      status: "ringing",
+      started_at: new Date().toISOString(),
+      duration_seconds: 0,
+    };
+    setCallLogs((prev) => {
+      const next = [localLog, ...prev];
+      persistLocalCallLogs(next);
+      return next;
+    });
+
+    fetch("/api/chat/calls", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        callId,
+        conversationId,
+        calleeIds,
+        callType,
+        isGroup,
+        title,
+      }),
+    }).catch(() => {});
+
+    globalChannelRef.current?.send({
+      type: "broadcast",
+      event: "call_invite",
+      payload: {
+        callId,
+        conversationId,
+        caller: currentUser,
+        calleeIds,
+        participants: participantList,
+        callType,
+        isGroup,
+        title,
+        avatarUrl,
+      },
+    });
+
+    // Mark as missed if nobody answers within 35 seconds.
+    callRingTimeoutRef.current = window.setTimeout(() => {
+      const current = activeCallRef.current;
+      if (current?.callId === callId && current.status === "ringing") {
+        globalChannelRef.current?.send({
+          type: "broadcast",
+          event: "call_end",
+          payload: {
+            callId,
+            fromUserId: currentUser.id,
+            isGroup,
+          },
+        });
+        updateCallLogEntry(callId, "missed", 0);
+        cleanupCallResources();
+        setToastNotification({
+          id: `missed-${callId}`,
+          conversationId,
+          title,
+          body: "No answer",
+          avatarUrl,
+        });
+      }
+    }, 35000);
+  }
+
+  function handleStartConversationCall(callType) {
+    if (!activeConversation) return;
+    const info = getConversationDisplay(activeConversation, currentUser.id);
+    const targetParticipants = (activeConversation.participants || []).filter(
+      (p) => p.id !== currentUser.id
+    );
+    handleStartCall({
+      conversationId: activeConversation.id,
+      targetParticipants,
+      callType,
+      isGroup: info.isGroup,
+      title: info.title,
+      avatarUrl: info.isGroup
+        ? activeConversation.avatarUrl || ""
+        : info.peer?.avatarUrl || "",
+    });
+  }
+
+  async function handleAcceptIncomingCall() {
+    const invite = incomingCallRef.current;
+    if (!invite) return;
+
+    stopRingtonePlayback();
+
+    const mediaRes = await acquireCallMedia({
+      video: invite.callType === "video",
+    });
+    if (!mediaRes.stream) {
+      setChatError(mediaRes.errorMessage || "Unable to access microphone.");
+      return;
+    }
+
+    localCallStreamRef.current = mediaRes.stream;
+    cameraTrackRef.current = mediaRes.stream.getVideoTracks()[0] || null;
+    setLocalCallStream(mediaRes.stream);
+    setIsCallMuted(false);
+    setIsCallVideoOn(mediaRes.hasVideo);
+    setIsScreenSharing(false);
+    setCallError(mediaRes.errorMessage || "");
+
+    const participantList = [
+      ...(invite.participants || []),
+      ...(invite.participants?.some((p) => p.id === currentUser.id)
+        ? []
+        : [currentUser]),
+    ];
+
+    const callSession = {
+      callId: invite.callId,
+      conversationId: invite.conversationId || null,
+      callType: invite.callType,
+      isGroup: Boolean(invite.isGroup),
+      title: invite.title || invite.caller?.displayName || "Call",
+      avatarUrl: invite.avatarUrl || invite.caller?.avatarUrl || "",
+      direction: "incoming",
+      status: "connected",
+      participants: participantList,
+    };
+
+    activeCallRef.current = callSession;
+    setActiveCall(callSession);
+    setIncomingCall(null);
+    startCallDurationClock();
+    updateCallLogEntry(invite.callId, "answered", 0);
+
+    // Notify everyone in the call that we joined and announce our media state.
+    globalChannelRef.current?.send({
+      type: "broadcast",
+      event: "call_join",
+      payload: {
+        callId: invite.callId,
+        user: currentUser,
+        isVideoOn: mediaRes.hasVideo,
+        isMuted: false,
+      },
+    });
+
+    if (invite.caller?.id) {
+      setPeerCallStates((prev) => ({
+        ...prev,
+        [invite.caller.id]: {
+          ...(prev[invite.caller.id] || {}),
+          connected: true,
+        },
+      }));
+      createOrGetPeerConnection(invite.callId, invite.caller.id);
+      if (currentUser.id < invite.caller.id) {
+        await sendOfferToPeer(invite.callId, invite.caller.id);
+      }
+    }
+  }
+
+  function handleDeclineIncomingCall() {
+    const invite = incomingCallRef.current;
+    if (!invite) return;
+    stopRingtonePlayback();
+    setIncomingCall(null);
+
+    globalChannelRef.current?.send({
+      type: "broadcast",
+      event: "call_decline",
+      payload: {
+        callId: invite.callId,
+        fromUserId: currentUser.id,
+        isGroup: Boolean(invite.isGroup),
+      },
+    });
+    updateCallLogEntry(invite.callId, "rejected", 0);
+  }
+
+  function handleEndActiveCall() {
+    const call = activeCallRef.current;
+    if (!call) return;
+
+    const duration = callDurationRef.current;
+    const finalStatus = call.status === "connected" ? "ended" : "missed";
+
+    globalChannelRef.current?.send({
+      type: "broadcast",
+      event: "call_end",
+      payload: {
+        callId: call.callId,
+        fromUserId: currentUser.id,
+        isGroup: Boolean(call.isGroup),
+      },
+    });
+
+    updateCallLogEntry(call.callId, finalStatus, duration);
+    cleanupCallResources();
+  }
+
+  function handleToggleCallMute() {
+    const nextMuted = !isCallMuted;
+    localCallStreamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = !nextMuted;
+    });
+    setIsCallMuted(nextMuted);
+    if (activeCallRef.current?.callId) {
+      broadcastMediaState(activeCallRef.current.callId, {
+        muted: nextMuted,
+        videoOn: isCallVideoOn,
+        screenSharing: isScreenSharing,
+      });
+    }
+  }
+
+  async function replaceVideoTrackAcrossPeers(newTrack) {
+    const entries = Array.from(peerConnectionsRef.current.entries());
+    let needsRenegotiation = false;
+
+    for (const [, pc] of entries) {
+      const videoSender = pc
+        .getSenders()
+        .find((sender) => sender.track?.kind === "video");
+
+      if (videoSender) {
+        await videoSender.replaceTrack(newTrack || null);
+      } else if (newTrack && localCallStreamRef.current) {
+        pc.addTrack(newTrack, localCallStreamRef.current);
+        needsRenegotiation = true;
+      }
+    }
+
+    if (needsRenegotiation) {
+      await renegotiateAllPeers();
+    }
+  }
+
+  async function handleToggleCallVideo() {
+    const call = activeCallRef.current;
+    if (!call) return;
+
+    if (isScreenSharing && screenTrackRef.current) {
+      screenTrackRef.current.stop();
+      screenTrackRef.current = null;
+      setIsScreenSharing(false);
+    }
+
+    const nextVideoOn = !isCallVideoOn;
+    if (nextVideoOn) {
+      let camTrack = cameraTrackRef.current;
+      if (!camTrack || camTrack.readyState !== "live") {
+        try {
+          const camStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              facingMode: "user",
+            },
+          });
+          camTrack = camStream.getVideoTracks()[0];
+          if (camTrack && localCallStreamRef.current) {
+            localCallStreamRef.current.getVideoTracks().forEach((t) => {
+              localCallStreamRef.current.removeTrack(t);
+            });
+            localCallStreamRef.current.addTrack(camTrack);
+            cameraTrackRef.current = camTrack;
+          }
+        } catch {
+          setCallError("Unable to turn on camera.");
+          return;
+        }
+      }
+
+      if (camTrack) {
+        camTrack.enabled = true;
+        await replaceVideoTrackAcrossPeers(camTrack);
+      }
+      setLocalCallStream(
+        localCallStreamRef.current
+          ? new MediaStream(localCallStreamRef.current.getTracks())
+          : null
+      );
+      setIsCallVideoOn(true);
+      broadcastMediaState(call.callId, {
+        muted: isCallMuted,
+        videoOn: true,
+        screenSharing: false,
+      });
+    } else {
+      if (cameraTrackRef.current) {
+        cameraTrackRef.current.enabled = false;
+      }
+      setIsCallVideoOn(false);
+      broadcastMediaState(call.callId, {
+        muted: isCallMuted,
+        videoOn: false,
+        screenSharing: false,
+      });
+    }
+  }
+
+  async function handleToggleScreenShare() {
+    const call = activeCallRef.current;
+    if (!call) return;
+
+    if (isScreenSharing) {
+      if (screenTrackRef.current) {
+        try {
+          screenTrackRef.current.stop();
+        } catch {
+          // Ignore stop errors.
+        }
+        screenTrackRef.current = null;
+      }
+      if (localCallStreamRef.current) {
+        localCallStreamRef.current.getVideoTracks().forEach((t) => {
+          if (t !== cameraTrackRef.current) {
+            localCallStreamRef.current.removeTrack(t);
+          }
+        });
+        if (cameraTrackRef.current && cameraTrackRef.current.readyState === "live") {
+          if (
+            !localCallStreamRef.current
+              .getVideoTracks()
+              .includes(cameraTrackRef.current)
+          ) {
+            localCallStreamRef.current.addTrack(cameraTrackRef.current);
+          }
+          cameraTrackRef.current.enabled = isCallVideoOn;
+          await replaceVideoTrackAcrossPeers(
+            isCallVideoOn ? cameraTrackRef.current : null
+          );
+        } else {
+          await replaceVideoTrackAcrossPeers(null);
+        }
+        setLocalCallStream(
+          new MediaStream(localCallStreamRef.current.getTracks())
+        );
+      }
+      setIsScreenSharing(false);
+      broadcastMediaState(call.callId, {
+        muted: isCallMuted,
+        videoOn: isCallVideoOn,
+        screenSharing: false,
+      });
+      return;
+    }
+
+    try {
+      const displayStream = await acquireScreenShareStream();
+      const screenTrack = displayStream.getVideoTracks()[0];
+      if (!screenTrack) return;
+
+      screenTrackRef.current = screenTrack;
+      if (localCallStreamRef.current) {
+        localCallStreamRef.current.getVideoTracks().forEach((t) => {
+          if (t !== cameraTrackRef.current) {
+            localCallStreamRef.current.removeTrack(t);
+          }
+        });
+        localCallStreamRef.current.addTrack(screenTrack);
+        setLocalCallStream(
+          new MediaStream(localCallStreamRef.current.getTracks())
+        );
+      }
+      await replaceVideoTrackAcrossPeers(screenTrack);
+      setIsScreenSharing(true);
+
+      screenTrack.onended = () => {
+        if (screenTrackRef.current === screenTrack) {
+          handleToggleScreenShare();
+        }
+      };
+
+      broadcastMediaState(call.callId, {
+        muted: isCallMuted,
+        videoOn: true,
+        screenSharing: true,
+      });
+    } catch {
+      setCallError("Screen sharing was cancelled or unavailable.");
+    }
+  }
+
+  function handleInviteUserToCall(targetUser) {
+    const call = activeCallRef.current;
+    if (!call || !targetUser?.id) return;
+
+    const alreadyInvited = call.participants?.some(
+      (p) => p.id === targetUser.id
+    );
+    if (alreadyInvited) return;
+
+    const updatedParticipants = [...(call.participants || []), targetUser];
+    const updatedCall = {
+      ...call,
+      isGroup: true,
+      participants: updatedParticipants,
+    };
+    activeCallRef.current = updatedCall;
+    setActiveCall(updatedCall);
+
+    globalChannelRef.current?.send({
+      type: "broadcast",
+      event: "call_invite",
+      payload: {
+        callId: call.callId,
+        conversationId: call.conversationId,
+        caller: currentUser,
+        calleeIds: [targetUser.id],
+        participants: updatedParticipants,
+        callType: call.callType,
+        isGroup: true,
+        title: call.title,
+        avatarUrl: call.avatarUrl,
+      },
+    });
+  }
+
+  useEffect(() => {
+    callSignalHandlersRef.current = {
+      onInvite: (payload) => {
+        if (!payload?.callId || !Array.isArray(payload.calleeIds)) return;
+        if (!payload.calleeIds.includes(currentUser.id)) return;
+        if (payload.caller?.id === currentUser.id) return;
+
+        if (activeCallRef.current || incomingCallRef.current) {
+          globalChannelRef.current?.send({
+            type: "broadcast",
+            event: "call_busy",
+            payload: {
+              callId: payload.callId,
+              fromUserId: currentUser.id,
+              targetUserId: payload.caller?.id,
+            },
+          });
+          return;
+        }
+
+        const localLog = {
+          id: payload.callId,
+          call_id: payload.callId,
+          conversation_id: payload.conversationId || null,
+          caller_id: payload.caller?.id,
+          callee_ids: payload.calleeIds,
+          call_type: payload.callType === "video" ? "video" : "audio",
+          is_group: Boolean(payload.isGroup),
+          title: payload.title || payload.caller?.displayName || "Call",
+          status: "ringing",
+          started_at: new Date().toISOString(),
+          duration_seconds: 0,
+        };
+
+        setCallLogs((prev) => {
+          if (prev.some((l) => l.call_id === payload.callId)) return prev;
+          const next = [localLog, ...prev];
+          persistLocalCallLogs(next);
+          return next;
+        });
+
+        setIncomingCall(payload);
+        stopRingtonePlayback();
+        ringtoneStopRef.current = startRingtone("incoming");
+
+        showBrowserDesktopNotification({
+          title: payload.title || payload.caller?.displayName || "Incoming Call",
+          body:
+            payload.callType === "video"
+              ? "Incoming video call..."
+              : "Incoming voice call...",
+          icon: payload.avatarUrl || payload.caller?.avatarUrl || "",
+          conversationId: payload.conversationId,
+        });
+
+        callRingTimeoutRef.current = window.setTimeout(() => {
+          if (incomingCallRef.current?.callId === payload.callId) {
+            stopRingtonePlayback();
+            setIncomingCall(null);
+            updateCallLogEntry(payload.callId, "missed", 0);
+          }
+        }, 35000);
+      },
+
+      onJoin: async (payload) => {
+        const call = activeCallRef.current;
+        if (!call || payload?.callId !== call.callId) return;
+        const joiner = payload.user;
+        if (!joiner?.id || joiner.id === currentUser.id) return;
+
+        stopRingtonePlayback();
+        startCallDurationClock();
+        updateCallLogEntry(call.callId, "answered", 0);
+
+        setActiveCall((prev) => {
+          if (!prev || prev.callId !== call.callId) return prev;
+          const hasMember = prev.participants?.some((p) => p.id === joiner.id);
+          const next = {
+            ...prev,
+            status: "connected",
+            participants: hasMember
+              ? prev.participants
+              : [...(prev.participants || []), joiner],
+          };
+          activeCallRef.current = next;
+          return next;
+        });
+
+        setPeerCallStates((prev) => ({
+          ...prev,
+          [joiner.id]: {
+            ...(prev[joiner.id] || {}),
+            connected: true,
+            isMuted: Boolean(payload.isMuted),
+            isVideoOn: Boolean(payload.isVideoOn),
+          },
+        }));
+
+        // Let the new participant know our current mute/video state too.
+        broadcastMediaState(call.callId, {
+          muted: isCallMuted,
+          videoOn: isCallVideoOn,
+          screenSharing: isScreenSharing,
+        });
+
+        createOrGetPeerConnection(call.callId, joiner.id);
+        if (currentUser.id < joiner.id) {
+          await sendOfferToPeer(call.callId, joiner.id);
+        }
+      },
+
+      onSignal: async (payload) => {
+        const call = activeCallRef.current;
+        if (
+          !call ||
+          payload?.callId !== call.callId ||
+          payload?.targetUserId !== currentUser.id ||
+          !payload?.fromUserId
+        ) {
+          return;
+        }
+
+        const peerId = payload.fromUserId;
+        const pc = createOrGetPeerConnection(call.callId, peerId);
+
+        if (payload.description) {
+          try {
+            const desc = new RTCSessionDescription(payload.description);
+            if (desc.type === "offer") {
+              await pc.setRemoteDescription(desc);
+              const queued = pendingIceCandidatesRef.current.get(peerId) || [];
+              pendingIceCandidatesRef.current.delete(peerId);
+              for (const cand of queued) {
+                await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+              }
+              const answer = await pc.createAnswer();
+              await pc.setLocalDescription(answer);
+              globalChannelRef.current?.send({
+                type: "broadcast",
+                event: "call_signal",
+                payload: {
+                  callId: call.callId,
+                  fromUserId: currentUser.id,
+                  targetUserId: peerId,
+                  description: pc.localDescription?.toJSON?.() || answer,
+                },
+              });
+            } else if (desc.type === "answer") {
+              if (pc.signalingState === "have-local-offer") {
+                await pc.setRemoteDescription(desc);
+                const queued =
+                  pendingIceCandidatesRef.current.get(peerId) || [];
+                pendingIceCandidatesRef.current.delete(peerId);
+                for (const cand of queued) {
+                  await pc
+                    .addIceCandidate(new RTCIceCandidate(cand))
+                    .catch(() => {});
+                }
+              }
+            }
+          } catch {
+            // Ignore transient SDP race errors.
+          }
+        } else if (payload.candidate) {
+          if (pc.remoteDescription) {
+            await pc
+              .addIceCandidate(new RTCIceCandidate(payload.candidate))
+              .catch(() => {});
+          } else {
+            const list = pendingIceCandidatesRef.current.get(peerId) || [];
+            list.push(payload.candidate);
+            pendingIceCandidatesRef.current.set(peerId, list);
+          }
+        }
+      },
+
+      onMediaState: (payload) => {
+        const call = activeCallRef.current;
+        if (!call || payload?.callId !== call.callId || !payload?.userId) {
+          return;
+        }
+        setPeerCallStates((prev) => ({
+          ...prev,
+          [payload.userId]: {
+            ...(prev[payload.userId] || {}),
+            isMuted: Boolean(payload.isMuted),
+            isVideoOn: Boolean(payload.isVideoOn),
+            isScreenSharing: Boolean(payload.isScreenSharing),
+          },
+        }));
+      },
+
+      onDecline: (payload) => {
+        const call = activeCallRef.current;
+        if (!call || payload?.callId !== call.callId) return;
+        if (!call.isGroup) {
+          updateCallLogEntry(call.callId, "rejected", 0);
+          cleanupCallResources();
+          setToastNotification({
+            id: `decline-${call.callId}`,
+            conversationId: call.conversationId,
+            title: call.title,
+            body: "Call declined",
+            avatarUrl: call.avatarUrl,
+          });
+        }
+      },
+
+      onBusy: (payload) => {
+        const call = activeCallRef.current;
+        if (
+          !call ||
+          payload?.callId !== call.callId ||
+          payload?.targetUserId !== currentUser.id
+        ) {
+          return;
+        }
+        if (!call.isGroup) {
+          updateCallLogEntry(call.callId, "missed", 0);
+          cleanupCallResources();
+          setToastNotification({
+            id: `busy-${call.callId}`,
+            conversationId: call.conversationId,
+            title: call.title,
+            body: "User is on another call",
+            avatarUrl: call.avatarUrl,
+          });
+        }
+      },
+
+      onEnd: (payload) => {
+        if (incomingCallRef.current?.callId === payload?.callId) {
+          stopRingtonePlayback();
+          setIncomingCall(null);
+          updateCallLogEntry(payload.callId, "missed", 0);
+          return;
+        }
+
+        const call = activeCallRef.current;
+        if (!call || payload?.callId !== call.callId) return;
+
+        const leaverId = payload.fromUserId;
+        const pc = peerConnectionsRef.current.get(leaverId);
+        if (pc) {
+          try {
+            pc.close();
+          } catch {
+            // Ignore close errors.
+          }
+          peerConnectionsRef.current.delete(leaverId);
+        }
+
+        setRemoteCallStreams((prev) => {
+          if (!prev[leaverId]) return prev;
+          const next = { ...prev };
+          delete next[leaverId];
+          return next;
+        });
+
+        if (!call.isGroup || peerConnectionsRef.current.size === 0) {
+          const duration = callDurationRef.current;
+          const finalStatus = call.status === "connected" ? "ended" : "missed";
+          updateCallLogEntry(call.callId, finalStatus, duration);
+          cleanupCallResources();
+        }
+      },
+    };
+  });
 
   function emitTyping(conversationId, isTyping) {
     if (!conversationId || !globalChannelRef.current) return;
@@ -903,18 +2020,17 @@ export default function ChatWorkspace({
     setPendingAttachment({ file, type, previewUrl });
   }
 
-  async function handleSendMessage(event) {
-    event.preventDefault();
-    if (!activeConversationId || isSending) return;
-    if (!draftText.trim() && !pendingAttachment) return;
+  async function sendConversationPayload(targetId, textToSend, attachmentToSend) {
+    if (!targetId || isSending) return;
+    if (!textToSend.trim() && !attachmentToSend) return;
 
     setChatError("");
     setIsSending(true);
-    emitTyping(activeConversationId, false);
+    emitTyping(targetId, false);
 
     try {
-      let targetConvId = activeConversationId;
-      let targetConv = activeConversation;
+      let targetConvId = targetId;
+      let targetConv = conversations.find((c) => c.id === targetId) || activeConversation;
 
       // Auto-upgrade any local direct:/group: placeholder conversation to a real DB UUID
       // if the chat tables are now ready in Supabase.
@@ -983,7 +2099,7 @@ export default function ChatWorkspace({
 
       let savedMsg;
       if (stillLocalOnly) {
-        if (pendingAttachment) {
+        if (attachmentToSend) {
           setChatError(
             "Run 003_create_chat_tables.sql in Supabase SQL Editor, then click Send again."
           );
@@ -994,7 +2110,7 @@ export default function ChatWorkspace({
           id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           conversation_id: targetConvId,
           sender_id: currentUser.id,
-          content: draftText.trim(),
+          content: textToSend.trim(),
           message_type: "text",
           media_url: null,
           media_name: null,
@@ -1006,15 +2122,15 @@ export default function ChatWorkspace({
         };
       } else {
         let res;
-        if (pendingAttachment) {
+        if (attachmentToSend) {
           const formData = new FormData();
           formData.append("conversationId", targetConvId);
-          formData.append("messageType", pendingAttachment.type);
+          formData.append("messageType", attachmentToSend.type);
           formData.append("recipientOnline", String(recipientOnline));
-          if (draftText.trim()) {
-            formData.append("content", draftText.trim());
+          if (textToSend.trim()) {
+            formData.append("content", textToSend.trim());
           }
-          formData.append("file", pendingAttachment.file);
+          formData.append("file", attachmentToSend.file);
 
           res = await fetch("/api/chat/messages", {
             method: "POST",
@@ -1026,7 +2142,7 @@ export default function ChatWorkspace({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               conversationId: targetConvId,
-              content: draftText.trim(),
+              content: textToSend.trim(),
               recipientOnline,
             }),
           });
@@ -1043,11 +2159,15 @@ export default function ChatWorkspace({
           savedMsg = { ...savedMsg, delivered_at: savedMsg.created_at };
         }
       }
-      setDraftText("");
-      if (pendingAttachment?.previewUrl) {
-        URL.revokeObjectURL(pendingAttachment.previewUrl);
+      if (!attachmentToSend || attachmentToSend === pendingAttachment) {
+        if (textToSend === draftText) {
+          setDraftText("");
+        }
+        if (pendingAttachment?.previewUrl) {
+          URL.revokeObjectURL(pendingAttachment.previewUrl);
+        }
+        setPendingAttachment(null);
       }
-      setPendingAttachment(null);
 
       setMessagesByConv((prev) => {
         const existing = prev[targetConvId] || [];
@@ -1081,6 +2201,15 @@ export default function ChatWorkspace({
     } finally {
       setIsSending(false);
     }
+  }
+
+  async function handleSendMessage(event) {
+    event.preventDefault();
+    await sendConversationPayload(
+      activeConversationId,
+      draftText,
+      pendingAttachment
+    );
   }
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -1302,11 +2431,12 @@ export default function ChatWorkspace({
           </div>
 
           {/* Filter Pills */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 flex-wrap">
             {[
               { id: "all", label: "All" },
               { id: "direct", label: "Chats" },
               { id: "group", label: "Groups" },
+              { id: "calls", label: "Calls" },
             ].map((tab) => {
               const active = filterTab === tab.id;
               return (
@@ -1314,7 +2444,7 @@ export default function ChatWorkspace({
                   key={tab.id}
                   type="button"
                   onClick={() => setFilterTab(tab.id)}
-                  className={`rounded-full px-4 py-1.5 text-xs font-medium transition cursor-pointer ${
+                  className={`rounded-full px-3.5 py-1.5 text-xs font-medium transition cursor-pointer ${
                     active
                       ? "bg-[#111111] dark:bg-[#2b8c98] text-white"
                       : "bg-neutral-100 dark:bg-[#0b141a] text-neutral-600 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-800"
@@ -1327,133 +2457,438 @@ export default function ChatWorkspace({
           </div>
         </div>
 
-        {/* Chat List + All Registered Users */}
+        {/* Chat List / Call History */}
         <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
-          {filteredConversations.map((conv) => {
-            const { title, peer, isGroup } = getConversationDisplay(
-              conv,
-              currentUser.id
-            );
-            const isSelected = conv.id === activeConversationId;
-            const peerOnline = peer ? onlineUserIds.has(peer.id) : false;
-            const typingNames = Object.values(typingByConv[conv.id] || {});
-            const isTyping = typingNames.length > 0;
+          {filterTab === "calls" ? (
+            <div className="space-y-4">
+              {(() => {
+                const filteredCallLogs = callLogs.filter((log) => {
+                  if (!normalizedQuery) return true;
+                  const titleText = String(log.title || "").toLowerCase();
+                  const peerMatch = (log.callee_ids || [])
+                    .concat(log.caller_id)
+                    .some((uid) => {
+                      const u = usersById.get(uid);
+                      return (
+                        (u?.displayName || "").toLowerCase().includes(normalizedQuery) ||
+                        (u?.username || "").toLowerCase().includes(normalizedQuery)
+                      );
+                    });
+                  return titleText.includes(normalizedQuery) || peerMatch;
+                });
 
-            return (
-              <button
-                key={conv.id}
-                type="button"
-                onClick={() => {
-                  setActiveConversationId(conv.id);
-                  if (
-                    !String(conv.id).startsWith("direct:") &&
-                    !String(conv.id).startsWith("group:")
-                  ) {
-                    if (!messagesByConv[conv.id]) {
-                      loadMessages(conv.id);
-                    } else {
-                      acknowledgeReceipt(conv.id, "read");
-                    }
-                  }
-                }}
-                className={`w-full flex items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition cursor-pointer ${
-                  isSelected
-                    ? "bg-neutral-100 dark:bg-[#202c33]"
-                    : "hover:bg-neutral-50 dark:hover:bg-[#1a242b]"
-                }`}
-              >
-                <AvatarBadge
-                  src={isGroup ? conv.avatarUrl : peer?.avatarUrl}
-                  name={title}
-                  isGroup={isGroup}
-                  isOnline={peerOnline}
-                  showPresence={!isGroup}
-                />
-
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 truncate">
-                      {title}
-                    </p>
-                    <span className="text-[11px] text-neutral-400 shrink-0">
-                      {formatRelativeTime(conv.lastMessageAt)}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2 mt-0.5">
-                    <p
-                      className={`text-xs truncate ${
-                        isTyping
-                          ? "text-[#2b8c98] dark:text-emerald-400 font-medium"
-                          : "text-neutral-500 dark:text-neutral-400"
-                      }`}
-                    >
-                      {isTyping
-                        ? isGroup
-                          ? `${typingNames[0]} is typing...`
-                          : "Typing..."
-                        : formatMessagePreview(conv.lastMessage)}
-                    </p>
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-
-          {discoverableUsers.length > 0 && (
-            <div className="pt-3">
-              <p className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
-                People ({discoverableUsers.length})
-              </p>
-              <div className="space-y-1">
-                {discoverableUsers.map((person) => {
-                  const online = onlineUserIds.has(person.id);
+                const callableUsers = users.filter((u) => {
+                  if (!normalizedQuery) return true;
                   return (
-                    <button
-                      key={person.id}
-                      type="button"
-                      onClick={() => handleStartDirectChat(person.id)}
-                      className="w-full flex items-center gap-3 rounded-2xl px-3 py-2.5 text-left hover:bg-neutral-50 dark:hover:bg-[#1a242b] transition cursor-pointer"
-                    >
-                      <AvatarBadge
-                        src={person.avatarUrl}
-                        name={person.displayName}
-                        isOnline={online}
-                        showPresence
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100 truncate">
-                            {person.displayName}
-                          </p>
-                          <span
-                            className={`text-[11px] font-medium shrink-0 ${
-                              online
-                                ? "text-emerald-600 dark:text-emerald-400"
-                                : "text-neutral-400"
-                            }`}
-                          >
-                            {online ? "Online" : "Offline"}
-                          </span>
+                    (u.displayName || "").toLowerCase().includes(normalizedQuery) ||
+                    (u.username || "").toLowerCase().includes(normalizedQuery) ||
+                    (u.email || "").toLowerCase().includes(normalizedQuery)
+                  );
+                });
+
+                return (
+                  <>
+                    <div>
+                      <p className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+                        Recent Calls ({filteredCallLogs.length})
+                      </p>
+                      {filteredCallLogs.length === 0 ? (
+                        <p className="px-3 py-4 text-xs text-neutral-500 dark:text-neutral-400">
+                          No call history yet. Start a voice or video call below.
+                        </p>
+                      ) : (
+                        <div className="space-y-1">
+                          {filteredCallLogs.map((log) => {
+                            const isOutgoing = log.caller_id === currentUser.id;
+                            const otherIds = isOutgoing
+                              ? log.callee_ids || []
+                              : [log.caller_id];
+                            const primaryUser = usersById.get(otherIds[0]);
+                            const matchedConv = log.conversation_id
+                              ? conversations.find((c) => c.id === log.conversation_id)
+                              : null;
+                            const convInfo = matchedConv
+                              ? getConversationDisplay(matchedConv, currentUser.id)
+                              : null;
+
+                            const displayName =
+                              convInfo?.title ||
+                              log.title ||
+                              primaryUser?.displayName ||
+                              "Call";
+                            const displayAvatar = log.is_group
+                              ? matchedConv?.avatarUrl || ""
+                              : primaryUser?.avatarUrl || "";
+                            const missedOrDeclined =
+                              log.status === "missed" || log.status === "rejected";
+                            const targetMembers = log.is_group
+                              ? (matchedConv?.participants ||
+                                  otherIds.map((id) => usersById.get(id)).filter(Boolean))
+                              : [primaryUser].filter(Boolean);
+
+                            return (
+                              <div
+                                key={log.call_id}
+                                className="flex items-center justify-between gap-2 rounded-2xl px-3 py-2.5 hover:bg-neutral-50 dark:hover:bg-[#1a242b] transition"
+                              >
+                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                  <AvatarBadge
+                                    src={displayAvatar}
+                                    name={displayName}
+                                    isGroup={Boolean(log.is_group)}
+                                    isOnline={
+                                      !log.is_group &&
+                                      Boolean(primaryUser && onlineUserIds.has(primaryUser.id))
+                                    }
+                                    showPresence={!log.is_group}
+                                  />
+                                  <div className="min-w-0 flex-1">
+                                    <p
+                                      className={`text-sm font-semibold truncate ${
+                                        missedOrDeclined && !isOutgoing
+                                          ? "text-red-500 dark:text-red-400"
+                                          : "text-neutral-900 dark:text-neutral-100"
+                                      }`}
+                                    >
+                                      {displayName}
+                                    </p>
+                                    <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate flex items-center gap-1.5">
+                                      <span
+                                        className={
+                                          missedOrDeclined
+                                            ? "text-red-500"
+                                            : isOutgoing
+                                              ? "text-[#2b8c98]"
+                                              : "text-emerald-500"
+                                        }
+                                      >
+                                        {isOutgoing ? "↗" : "↙"}
+                                      </span>
+                                      <span>
+                                        {isOutgoing
+                                          ? "Outgoing"
+                                          : log.status === "missed"
+                                            ? "Missed"
+                                            : log.status === "rejected"
+                                              ? "Declined"
+                                              : "Incoming"}
+                                        {log.duration_seconds > 0
+                                          ? ` · ${formatCallDuration(log.duration_seconds)}`
+                                          : ""}
+                                      </span>
+                                      <span>· {formatRelativeTime(log.started_at)}</span>
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <button
+                                    type="button"
+                                    disabled={targetMembers.length === 0}
+                                    onClick={() =>
+                                      handleStartCall({
+                                        conversationId: log.conversation_id || null,
+                                        targetParticipants: targetMembers,
+                                        callType: "audio",
+                                        isGroup: Boolean(log.is_group),
+                                        title: displayName,
+                                        avatarUrl: displayAvatar,
+                                      })
+                                    }
+                                    title="Voice Call"
+                                    aria-label={`Voice call ${displayName}`}
+                                    className="h-8 w-8 rounded-full flex items-center justify-center text-[#2b8c98] hover:bg-[#2b8c98]/15 transition cursor-pointer disabled:opacity-40"
+                                  >
+                                    <svg
+                                      xmlns="http://www.w3.org/2000/svg"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      className="h-4 w-4"
+                                    >
+                                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={targetMembers.length === 0}
+                                    onClick={() =>
+                                      handleStartCall({
+                                        conversationId: log.conversation_id || null,
+                                        targetParticipants: targetMembers,
+                                        callType: "video",
+                                        isGroup: Boolean(log.is_group),
+                                        title: displayName,
+                                        avatarUrl: displayAvatar,
+                                      })
+                                    }
+                                    title="Video Call"
+                                    aria-label={`Video call ${displayName}`}
+                                    className="h-8 w-8 rounded-full flex items-center justify-center text-[#2b8c98] hover:bg-[#2b8c98]/15 transition cursor-pointer disabled:opacity-40"
+                                  >
+                                    <svg
+                                      xmlns="http://www.w3.org/2000/svg"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      className="h-4 w-4"
+                                    >
+                                      <polygon points="23 7 16 12 23 17 23 7" />
+                                      <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                                    </svg>
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
-                        <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate">
-                          {person.username
-                            ? `@${person.username}`
-                            : person.email}
+                      )}
+                    </div>
+
+                    {callableUsers.length > 0 && (
+                      <div>
+                        <p className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+                          Start New Call ({callableUsers.length})
+                        </p>
+                        <div className="space-y-1">
+                          {callableUsers.map((person) => {
+                            const online = onlineUserIds.has(person.id);
+                            const existingDirect = conversations.find(
+                              (c) =>
+                                c.type === "direct" &&
+                                c.participants?.some((p) => p.id === person.id)
+                            );
+                            return (
+                              <div
+                                key={person.id}
+                                className="flex items-center justify-between gap-2 rounded-2xl px-3 py-2 hover:bg-neutral-50 dark:hover:bg-[#1a242b] transition"
+                              >
+                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                  <AvatarBadge
+                                    src={person.avatarUrl}
+                                    name={person.displayName}
+                                    isOnline={online}
+                                    showPresence
+                                  />
+                                  <div className="min-w-0">
+                                    <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100 truncate">
+                                      {person.displayName}
+                                    </p>
+                                    <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate">
+                                      {person.phone ||
+                                        (person.username
+                                          ? `@${person.username}`
+                                          : person.email)}
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleStartCall({
+                                        conversationId: existingDirect?.id || null,
+                                        targetParticipants: [person],
+                                        callType: "audio",
+                                        isGroup: false,
+                                        title: person.displayName,
+                                        avatarUrl: person.avatarUrl || "",
+                                      })
+                                    }
+                                    title={`Voice call ${person.displayName}`}
+                                    aria-label={`Voice call ${person.displayName}`}
+                                    className="h-8 w-8 rounded-full flex items-center justify-center text-neutral-600 dark:text-neutral-300 hover:text-[#2b8c98] hover:bg-neutral-100 dark:hover:bg-neutral-800 transition cursor-pointer"
+                                  >
+                                    <svg
+                                      xmlns="http://www.w3.org/2000/svg"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      className="h-4 w-4"
+                                    >
+                                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleStartCall({
+                                        conversationId: existingDirect?.id || null,
+                                        targetParticipants: [person],
+                                        callType: "video",
+                                        isGroup: false,
+                                        title: person.displayName,
+                                        avatarUrl: person.avatarUrl || "",
+                                      })
+                                    }
+                                    title={`Video call ${person.displayName}`}
+                                    aria-label={`Video call ${person.displayName}`}
+                                    className="h-8 w-8 rounded-full flex items-center justify-center text-neutral-600 dark:text-neutral-300 hover:text-[#2b8c98] hover:bg-neutral-100 dark:hover:bg-neutral-800 transition cursor-pointer"
+                                  >
+                                    <svg
+                                      xmlns="http://www.w3.org/2000/svg"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      className="h-4 w-4"
+                                    >
+                                      <polygon points="23 7 16 12 23 17 23 7" />
+                                      <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                                    </svg>
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          ) : (
+            <>
+              {filteredConversations.map((conv) => {
+                const { title, peer, isGroup } = getConversationDisplay(
+                  conv,
+                  currentUser.id
+                );
+                const isSelected = conv.id === activeConversationId;
+                const peerOnline = peer ? onlineUserIds.has(peer.id) : false;
+                const typingNames = Object.values(typingByConv[conv.id] || {});
+                const isTyping = typingNames.length > 0;
+
+                return (
+                  <button
+                    key={conv.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveConversationId(conv.id);
+                      if (
+                        !String(conv.id).startsWith("direct:") &&
+                        !String(conv.id).startsWith("group:")
+                      ) {
+                        if (!messagesByConv[conv.id]) {
+                          loadMessages(conv.id);
+                        } else {
+                          acknowledgeReceipt(conv.id, "read");
+                        }
+                      }
+                    }}
+                    className={`w-full flex items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition cursor-pointer ${
+                      isSelected
+                        ? "bg-neutral-100 dark:bg-[#202c33]"
+                        : "hover:bg-neutral-50 dark:hover:bg-[#1a242b]"
+                    }`}
+                  >
+                    <AvatarBadge
+                      src={isGroup ? conv.avatarUrl : peer?.avatarUrl}
+                      name={title}
+                      isGroup={isGroup}
+                      isOnline={peerOnline}
+                      showPresence={!isGroup}
+                    />
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 truncate">
+                          {title}
+                        </p>
+                        <span className="text-[11px] text-neutral-400 shrink-0">
+                          {formatRelativeTime(conv.lastMessageAt)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 mt-0.5">
+                        <p
+                          className={`text-xs truncate ${
+                            isTyping
+                              ? "text-[#2b8c98] dark:text-emerald-400 font-medium"
+                              : "text-neutral-500 dark:text-neutral-400"
+                          }`}
+                        >
+                          {isTyping
+                            ? isGroup
+                              ? `${typingNames[0]} is typing...`
+                              : "Typing..."
+                            : formatMessagePreview(conv.lastMessage)}
                         </p>
                       </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+                    </div>
+                  </button>
+                );
+              })}
 
-          {filteredConversations.length === 0 &&
-            discoverableUsers.length === 0 && (
-              <p className="py-10 text-center text-xs text-neutral-500 dark:text-neutral-400">
-                No chats or people found yet.
-              </p>
-            )}
+              {discoverableUsers.length > 0 && (
+                <div className="pt-3">
+                  <p className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+                    People ({discoverableUsers.length})
+                  </p>
+                  <div className="space-y-1">
+                    {discoverableUsers.map((person) => {
+                      const online = onlineUserIds.has(person.id);
+                      return (
+                        <button
+                          key={person.id}
+                          type="button"
+                          onClick={() => handleStartDirectChat(person.id)}
+                          className="w-full flex items-center gap-3 rounded-2xl px-3 py-2.5 text-left hover:bg-neutral-50 dark:hover:bg-[#1a242b] transition cursor-pointer"
+                        >
+                          <AvatarBadge
+                            src={person.avatarUrl}
+                            name={person.displayName}
+                            isOnline={online}
+                            showPresence
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-sm font-medium text-neutral-900 dark:text-neutral-100 truncate">
+                                {person.displayName}
+                              </p>
+                              <span
+                                className={`text-[11px] font-medium shrink-0 ${
+                                  online
+                                    ? "text-emerald-600 dark:text-emerald-400"
+                                    : "text-neutral-400"
+                                }`}
+                              >
+                                {online ? "Online" : "Offline"}
+                              </span>
+                            </div>
+                            <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate">
+                              {person.username
+                                ? `@${person.username}`
+                                : person.email}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {filteredConversations.length === 0 &&
+                discoverableUsers.length === 0 && (
+                  <p className="py-10 text-center text-xs text-neutral-500 dark:text-neutral-400">
+                    No chats or people found yet.
+                  </p>
+                )}
+            </>
+          )}
         </div>
 
         {/* Sidebar Footer */}
@@ -1576,7 +3011,50 @@ export default function ChatWorkspace({
                 </button>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handleStartConversationCall("video")}
+                  aria-label={activeInfo.isGroup ? "Group Video Call" : "Video Call"}
+                  title={activeInfo.isGroup ? "Group Video Call" : "Video Call"}
+                  className="h-9 w-9 rounded-full flex items-center justify-center text-neutral-600 dark:text-neutral-300 hover:text-[#2b8c98] hover:bg-neutral-100 dark:hover:bg-neutral-800 transition cursor-pointer"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.9"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="h-[18px] w-[18px]"
+                  >
+                    <polygon points="23 7 16 12 23 17 23 7" />
+                    <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                  </svg>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleStartConversationCall("audio")}
+                  aria-label={activeInfo.isGroup ? "Group Voice Call" : "Voice Call"}
+                  title={activeInfo.isGroup ? "Group Voice Call" : "Voice Call"}
+                  className="h-9 w-9 rounded-full flex items-center justify-center text-neutral-600 dark:text-neutral-300 hover:text-[#2b8c98] hover:bg-neutral-100 dark:hover:bg-neutral-800 transition cursor-pointer"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.9"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="h-[17px] w-[17px]"
+                  >
+                    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+                  </svg>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => setIsInfoDrawerOpen((prev) => !prev)}
@@ -1839,6 +3317,40 @@ export default function ChatWorkspace({
         onlineUserIds={onlineUserIds}
         onClose={() => setIsGroupModalOpen(false)}
         onCreateGroup={handleCreateGroup}
+      />
+
+      <CallOverlay
+        currentUser={currentUser}
+        incomingCall={incomingCall}
+        activeCall={activeCall}
+        localStream={localCallStream}
+        remoteStreams={remoteCallStreams}
+        peerStates={peerCallStates}
+        allUsers={users}
+        callMessages={
+          activeCall?.conversationId
+            ? messagesByConv[activeCall.conversationId] || []
+            : []
+        }
+        elapsedSeconds={callElapsedSeconds}
+        isMuted={isCallMuted}
+        isVideoOn={isCallVideoOn}
+        isScreenSharing={isScreenSharing}
+        isSpeakerOn={isSpeakerOn}
+        callError={callError}
+        onAcceptIncoming={handleAcceptIncomingCall}
+        onDeclineIncoming={handleDeclineIncomingCall}
+        onEndCall={handleEndActiveCall}
+        onToggleMute={handleToggleCallMute}
+        onToggleVideo={handleToggleCallVideo}
+        onToggleScreenShare={handleToggleScreenShare}
+        onToggleSpeaker={() => setIsSpeakerOn((prev) => !prev)}
+        onInviteUser={handleInviteUserToCall}
+        onSendCallMessage={(text) =>
+          activeCall?.conversationId
+            ? sendConversationPayload(activeCall.conversationId, text, null)
+            : Promise.resolve()
+        }
       />
     </div>
   );

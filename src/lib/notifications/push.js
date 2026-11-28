@@ -17,28 +17,19 @@ function configureWebPush() {
 }
 
 /**
- * Sends Web Push desktop notifications to all other members of a conversation.
+ * Sends Web Push notifications to a list of recipient user IDs.
  */
-export async function sendPushToConversationMembers({
+export async function sendPushToRecipients({
   adminSupabase,
+  recipientIds,
+  title,
+  body,
+  icon,
   conversationId,
-  senderId,
-  senderName,
-  senderAvatar,
-  groupName,
-  previewText,
+  url,
 }) {
   if (!configureWebPush()) return;
-
-  const { data: participants, error: partErr } = await adminSupabase
-    .from("conversation_participants")
-    .select("user_id")
-    .eq("conversation_id", conversationId)
-    .neq("user_id", senderId);
-
-  if (partErr || !participants?.length) return;
-
-  const recipientIds = participants.map((p) => p.user_id);
+  if (!Array.isArray(recipientIds) || recipientIds.length === 0) return;
 
   const { data: subscriptions, error: subErr } = await adminSupabase
     .from("push_subscriptions")
@@ -54,13 +45,12 @@ export async function sendPushToConversationMembers({
 
   if (!subscriptions?.length) return;
 
-  const title = groupName ? `${groupName} · ${senderName}` : senderName;
   const payload = JSON.stringify({
     title,
-    body: previewText,
-    icon: senderAvatar || "/favicon.ico",
-    conversationId,
-    url: `/?chat=${encodeURIComponent(conversationId)}`,
+    body,
+    icon: icon || "/favicon.ico",
+    conversationId: conversationId || null,
+    url: url || (conversationId ? `/?chat=${encodeURIComponent(conversationId)}` : "/"),
   });
 
   const expiredIds = [];
@@ -89,4 +79,40 @@ export async function sendPushToConversationMembers({
       .delete()
       .in("id", expiredIds);
   }
+}
+
+/**
+ * Sends Web Push desktop notifications to all other members of a conversation.
+ */
+export async function sendPushToConversationMembers({
+  adminSupabase,
+  conversationId,
+  senderId,
+  senderName,
+  senderAvatar,
+  groupName,
+  previewText,
+}) {
+  if (!configureWebPush()) return;
+
+  const { data: participants, error: partErr } = await adminSupabase
+    .from("conversation_participants")
+    .select("user_id")
+    .eq("conversation_id", conversationId)
+    .neq("user_id", senderId);
+
+  if (partErr || !participants?.length) return;
+
+  const recipientIds = participants.map((p) => p.user_id);
+  const title = groupName ? `${groupName} · ${senderName}` : senderName;
+
+  await sendPushToRecipients({
+    adminSupabase,
+    recipientIds,
+    title,
+    body: previewText,
+    icon: senderAvatar || "/favicon.ico",
+    conversationId,
+    url: `/?chat=${encodeURIComponent(conversationId)}`,
+  });
 }

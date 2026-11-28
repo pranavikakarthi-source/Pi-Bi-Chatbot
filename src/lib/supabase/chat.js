@@ -157,3 +157,24 @@ export async function isUserParticipant(adminSupabase, conversationId, userId) {
 
   return { isMember: Boolean(data), chatTablesReady: true };
 }
+
+/**
+ * Fetches recent voice/video call logs for a given user.
+ */
+export async function listUserCallLogs(adminSupabase, userId) {
+  const { data, error } = await adminSupabase
+    .from("call_logs")
+    .select("*")
+    .or(`caller_id.eq.${userId},callee_ids.cs.{${userId}}`)
+    .order("started_at", { ascending: false })
+    .limit(60);
+
+  if (error) {
+    if (isChatSchemaPendingError(error)) {
+      return { callLogs: [], callTablesReady: false };
+    }
+    throw new Error(error.message);
+  }
+
+  return { callLogs: data || [], callTablesReady: true };
+}

@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import {
   listAllChatUsers,
+  listUserCallLogs,
   listUserConversations,
 } from "@/lib/supabase/chat";
 
@@ -32,11 +33,10 @@ export async function GET() {
 
     const otherUsers = allUsers.filter((u) => u.id !== user.id);
 
-    const { conversations, chatTablesReady } = await listUserConversations(
-      adminSupabase,
-      user.id,
-      usersById
-    );
+    const [{ conversations, chatTablesReady }, { callLogs }] = await Promise.all([
+      listUserConversations(adminSupabase, user.id, usersById),
+      listUserCallLogs(adminSupabase, user.id),
+    ]);
 
     return NextResponse.json({
       ok: true,
@@ -44,6 +44,7 @@ export async function GET() {
       users: otherUsers,
       conversations,
       chatTablesReady,
+      callLogs,
     });
   } catch (err) {
     return NextResponse.json(
